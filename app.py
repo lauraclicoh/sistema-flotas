@@ -533,18 +533,47 @@ if perfil == "Analista":
 
     # ──── Filtrar y priorizar pool ────
     pool = base[(base["zona"] == zona_sel) & (base["vehiculo_norm"] == vh_sel)].copy()
-    pool = filtrar_pool(pool)  # quitar rechazados y pausados
+    pool = filtrar_pool(pool)
     pool["PRIORIDAD"] = pool["dias"].apply(prioridad_label)
 
-    # Orden: ALTA primero, MEDIA, BAJA
     orden_prio = {"🔴 ALTA": 0, "🟡 MEDIA": 1, "🟢 BAJA": 2}
     pool["_orden"] = pool["PRIORIDAD"].map(orden_prio).fillna(3)
-    pool = pool.sort_values("_orden").drop(columns=["_orden"])
+    pool = pool.sort_values("_orden").drop(columns=["_orden"]).reset_index(drop=True)
 
+    # Quitar aliados ya gestionados hoy por cualquier analista
+    if not hist.empty:
+        gestionados_hoy = hist[hist["fecha"].dt.date == datetime.now().date()]["identificacion"].astype(str).tolist()
+        pool = pool[~pool["identificacion"].astype(str).isin(gestionados_hoy)]
+
+    REPARTO_FILE = "reparto.csv"
     cant = st.number_input("Cantidad de aliados a gestionar", min_value=10, max_value=150, value=30)
 
     if st.button("🚀 Generar mis llamadas"):
-        st.session_state["pool_activo"] = pool.head(int(cant)).reset_index(drop=True)
+        hoy_str = datetime.now().date().isoformat()
+
+        if os.path.exists(REPARTO_FILE):
+            reparto_df = pd.read_csv(REPARTO_FILE)
+            if "fecha" not in reparto_df.columns or (len(reparto_df) > 0 and reparto_df["fecha"].iloc[0] != hoy_str):
+                reparto_df = pd.DataFrame(columns=["fecha","analista","identificacion"])
+        else:
+            reparto_df = pd.DataFrame(columns=["fecha","analista","identificacion"])
+
+        ya_asignados = reparto_df[reparto_df["fecha"] == hoy_str]["identificacion"].astype(str).tolist()
+        pool_disponible = pool[~pool["identificacion"].astype(str).isin(ya_asignados)]
+        mi_bloque = pool_disponible.head(int(cant)).reset_index(drop=True)
+
+        if mi_bloque.empty:
+            st.warning("No hay mas aliados disponibles. Todos ya fueron asignados a otros analistas.")
+        else:
+            nuevos = pd.DataFrame({
+                "fecha":          [hoy_str] * len(mi_bloque),
+                "analista":       [nombre]  * len(mi_bloque),
+                "identificacion": mi_bloque["identificacion"].astype(str).tolist(),
+            })
+            reparto_actualizado = pd.concat([reparto_df, nuevos], ignore_index=True)
+            reparto_actualizado.to_csv(REPARTO_FILE, index=False)
+            st.session_state["pool_activo"] = mi_bloque
+            st.success(f"Se te asignaron {len(mi_bloque)} aliados unicos.")
 
     # ──── Mostrar pool activo ────
     if "pool_activo" in st.session_state and not st.session_state["pool_activo"].empty:
