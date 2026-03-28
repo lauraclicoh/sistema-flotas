@@ -62,12 +62,9 @@ def cargar_base():
     if not os.path.exists(BASE):
         return None
     try:
-        df = pd.read_excel(BASE)
+        df = pd.read_excel(BASE, engine="openpyxl")
     except Exception:
-        try:
-            df = pd.read_csv(BASE)
-        except Exception:
-            return None
+        return None
 
     # Normalizar nombres de columnas
     df.columns = df.columns.str.strip().str.lower().str.replace(" ", "_")
@@ -424,20 +421,20 @@ if perfil == "Coordinador":
         st.subheader("Cargar base diaria")
         st.info("La base que subas hoy reemplaza la anterior. Los rechazados y pausas se mantienen.")
 
-        archivo = st.file_uploader("Selecciona archivo Excel o CSV", type=["xlsx", "csv"])
+        archivo = st.file_uploader("Selecciona archivo Excel (.xlsx)", type=["xlsx"])
 
         if archivo:
             try:
-                df_nuevo = pd.read_excel(archivo)
-            except Exception:
-                df_nuevo = pd.read_csv(archivo)
-
-            df_nuevo.to_excel(BASE, index=False)
-            base = cargar_base()
-            if base is not None:
-                st.success(f"✅ Base cargada — {len(base):,} registros disponibles.")
-            else:
-                st.error("El archivo tiene un problema. Verifica que sea un Excel válido.")
+                df_nuevo = pd.read_excel(archivo, engine="openpyxl")
+                df_nuevo.to_excel(BASE, index=False)
+                base = cargar_base()
+                if base is not None:
+                    st.success(f"✅ Base cargada — {len(base):,} registros disponibles.")
+                else:
+                    st.error("El archivo se leyó pero tiene un problema en las columnas. Verifica que sea un Excel válido (.xlsx).")
+            except Exception as e:
+                st.error(f"❌ No se pudo leer el archivo. Asegúrate de que sea un Excel (.xlsx) válido.")
+                st.caption(f"Detalle técnico: {str(e)}")
 
         if base is not None:
             st.info(f"Base activa: **{len(base):,} aliados** cargados.")
