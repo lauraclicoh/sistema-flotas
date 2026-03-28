@@ -546,7 +546,25 @@ if perfil == "Analista":
         pool = pool[~pool["identificacion"].astype(str).isin(gestionados_hoy)]
 
     REPARTO_FILE = "reparto.csv"
-    cant = st.number_input("Cantidad de aliados a gestionar", min_value=10, max_value=150, value=30)
+
+    col_cant, col_prio = st.columns(2)
+    with col_cant:
+        cant = st.number_input("Cantidad de aliados", min_value=10, max_value=300, value=30)
+    with col_prio:
+        filtro_prio = st.selectbox(
+            "Prioridad a incluir",
+            ["Todas (ALTA + MEDIA + BAJA)", "Solo 🔴 ALTA", "Solo 🟡 MEDIA", "Solo 🟢 BAJA"],
+            help="Por defecto incluye las 3 prioridades para gestionar también aliados nuevos"
+        )
+
+    # Aplicar filtro de prioridad si se elige uno específico
+    if filtro_prio == "Solo 🔴 ALTA":
+        pool = pool[pool["PRIORIDAD"] == "🔴 ALTA"]
+    elif filtro_prio == "Solo 🟡 MEDIA":
+        pool = pool[pool["PRIORIDAD"] == "🟡 MEDIA"]
+    elif filtro_prio == "Solo 🟢 BAJA":
+        pool = pool[pool["PRIORIDAD"] == "🟢 BAJA"]
+    # Si es "Todas" no filtra — incluye las 3 prioridades
 
     if st.button("🚀 Generar mis llamadas"):
         hoy_str = datetime.now().date().isoformat()
@@ -579,81 +597,83 @@ if perfil == "Analista":
     if "pool_activo" in st.session_state and not st.session_state["pool_activo"].empty:
 
         pool_activo = st.session_state["pool_activo"]
+        total_orig  = len(pool_activo) + st.session_state.get("hechas", 0)
+
+        # Barra de progreso
+        hechas    = st.session_state.get("hechas", 0)
+        restantes = len(pool_activo)
+        pct       = int(hechas / (hechas + restantes) * 100) if (hechas + restantes) > 0 else 0
+        st.progress(pct, text=f"Progreso: {hechas} gestionados / {restantes} pendientes")
 
         cols_mostrar = [c for c in ["identificacion","mensajero","celular","zona","vehiculo","dias","PRIORIDAD"]
                         if c in pool_activo.columns]
 
-        st.markdown("#### 📋 Aliados a gestionar")
+        st.markdown("#### 📋 Aliados pendientes")
         st.dataframe(pool_activo[cols_mostrar], use_container_width=True)
 
         st.markdown("---")
         st.markdown("#### 📞 Registrar gestión")
 
-        opciones_aliado = pool_activo["identificacion"].astype(str).tolist()
-        aliado_sel = st.selectbox("Selecciona la cédula del aliado", opciones_aliado)
+        # Usar st.form para evitar recargas en cada cambio de campo (mejora velocidad)
+        with st.form(key="form_gestion", clear_on_submit=True):
 
-        # Mostrar info del aliado seleccionado
-        fila = pool_activo[pool_activo["identificacion"].astype(str) == aliado_sel]
-        if not fila.empty:
-            f = fila.iloc[0]
-            info_cols = [c for c in ["mensajero","celular","zona","vehiculo","PRIORIDAD"] if c in f.index]
-            cols_info = st.columns(len(info_cols))
-            for i, col_name in enumerate(info_cols):
-                cols_info[i].metric(col_name.capitalize(), str(f[col_name]))
+            opciones_aliado = pool_activo["identificacion"].astype(str).tolist()
+            aliado_sel = st.selectbox("Cédula del aliado", opciones_aliado)
 
-        resultado = st.selectbox("Resultado de la llamada", RESULTADOS)
+            # Info del aliado
+            fila = pool_activo[pool_activo["identificacion"].astype(str) == aliado_sel]
+            if not fila.empty:
+                f = fila.iloc[0]
+                info_cols = [c for c in ["mensajero","celular","PRIORIDAD"] if c in f.index]
+                cols_info = st.columns(len(info_cols))
+                for i, col_name in enumerate(info_cols):
+                    cols_info[i].metric(col_name.capitalize(), str(f[col_name]))
 
-        estado = None
-        razon  = None
-        obs    = ""
+            resultado = st.selectbox("Resultado de la llamada", RESULTADOS)
+            estado    = st.selectbox("Estado final (solo si contestó)", ["-"] + ESTADOS_FINALES)
+            razon     = st.selectbox("Razón (solo si contestó)", ["-"] + RAZONES)
+            obs       = st.text_area("Observación (opcional)")
 
-        # Solo pedir estado/razón si contestó
-        if resultado == "Sí contestó":
-            estado = st.selectbox("Estado final", ESTADOS_FINALES)
-            razon  = st.selectbox("Razón", RAZONES)
-            obs    = st.text_area("Observación adicional (opcional)")
+            submitted = st.form_submit_button("💾 Guardar y siguiente")
 
-        if st.button("💾 Guardar gestión"):
+        if submitted:
+            estado_real = None if estado == "-" else estado
+            razon_real  = None if razon  == "-" else razon
 
-            row_dict = {
-                "fecha":          datetime.now(),
-                "analista":       nombre,
-                "identificacion": aliado_sel,
-                "resultado":      resultado,
-                "estado":         estado,
-                "razon":          razon,
-                "obs":            obs,
-            }
-
-            guardar_gestion(row_dict)
-
-            # Lógica de bloqueos
-            if estado == "Aliado Rechaza la oferta":
-                guardar_rechazado(aliado_sel)
-                st.warning("🚫 Aliado marcado como rechazado — no volverá a aparecer.")
-
-            elif estado in ("Interesado llega a cargue", "Aliado Fleet/Delivery no acepta hub"):
-                guardar_pausa(aliado_sel)
-                st.info("⏸ Aliado en pausa 5 días.")
-
-            # Quitar del pool activo
-            nuevo_pool = pool_activo[pool_activo["identificacion"].astype(str) != aliado_sel]
-            st.session_state["pool_activo"] = nuevo_pool.reset_index(drop=True)
-
-            pendientes = len(nuevo_pool)
-            if pendientes > 0:
-                st.success(f"✅ Guardado. Te quedan **{pendientes}** aliados pendientes.")
+            # Validar: si contestó debe tener estado
+            if resultado == "Sí contestó" and estado_real is None:
+                st.error("Si el aliado contestó, debes seleccionar un Estado final.")
             else:
-                st.success("✅ ¡Completaste todas tus llamadas del pool! Puedes generar más si necesitas.")
-                del st.session_state["pool_activo"]
+                row_dict = {
+                    "fecha":          datetime.now(),
+                    "analista":       nombre,
+                    "identificacion": aliado_sel,
+                    "resultado":      resultado,
+                    "estado":         estado_real,
+                    "razon":          razon_real,
+                    "obs":            obs,
+                }
 
-        # Contador de progreso
-        if "pool_activo" in st.session_state:
-            total_orig = int(cant)
-            restantes  = len(st.session_state["pool_activo"])
-            hechas     = total_orig - restantes
-            pct        = int(hechas / total_orig * 100) if total_orig else 0
-            st.progress(pct, text=f"Progreso: {hechas}/{total_orig} llamadas ({pct}%)")
+                guardar_gestion(row_dict)
+
+                # Bloqueos
+                if estado_real == "Aliado Rechaza la oferta":
+                    guardar_rechazado(aliado_sel)
+                elif estado_real in ("Interesado llega a cargue", "Aliado Fleet/Delivery no acepta hub"):
+                    guardar_pausa(aliado_sel)
+
+                # Quitar del pool y contar
+                nuevo_pool = pool_activo[pool_activo["identificacion"].astype(str) != aliado_sel]
+                st.session_state["pool_activo"] = nuevo_pool.reset_index(drop=True)
+                st.session_state["hechas"] = st.session_state.get("hechas", 0) + 1
+
+                if nuevo_pool.empty:
+                    st.success("✅ ¡Completaste todas tus llamadas! Puedes generar más.")
+                    del st.session_state["pool_activo"]
+                    st.session_state["hechas"] = 0
+
+                # Rerun limpia el formulario y refresca la página
+                st.rerun()
 
     # Resumen del analista (sus gestiones de hoy)
     if not hist.empty:
