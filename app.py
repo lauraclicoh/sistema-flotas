@@ -3,182 +3,216 @@ import pandas as pd
 from datetime import datetime, timedelta
 import gspread
 from google.oauth2.service_account import Credentials
+import plotly.express as px
 
-# ================= 1. CONFIGURACIÓN INICIAL =================
-st.set_page_config(layout="wide", page_title="CRM Aliados Clicoh")
+# ================= 1. CONFIGURACIÓN Y CONSTANTES =================
+st.set_page_config(layout="wide", page_title="Gestión Programación Aliados v4.0")
 
-# Listas para que el analista seleccione (Tus reglas de negocio)
-ANALISTAS = ["Deisy Liliana Garcia", "Erica Tatiana Garzon", "Dayan Stefany Suarez", "Carlos Andres Loaiza"]
+ANALISTAS = {
+    "Deisy Liliana Garcia": "dgarcia@clicoh.com",
+    "Erica Tatiana Garzon": "etgarzon@clicoh.com",
+    "Dayan Stefany Suarez": "dsuarez@clicoh.com",
+    "Carlos Andres Loaiza": "cloaiza@clicoh.com",
+}
+
 RESULTADOS = ["Apagado", "Fuera de servicio", "No contestó", "Número errado", "Sí contestó"]
 ESTADOS_FINALES = ["Aliado Rechaza la oferta", "Aliado Fleet/Delivery no acepta hub", "Interesado llega a cargue", "Interesado esporádico", "Empleado", "Point"]
 RAZONES = ["Interesado carga hoy", "No le interesa / cuestiones personales", "No tiene Vh / Vh dañado", "Peso / Volumen / recorrido", "Tarifa", "Tiene trabajo fijo", "Fuera de la ciudad", "Aliado no carga en HUB", "Ocasional", "Empleado", "Point"]
 
-# ================= 2. CONEXIÓN CON GOOGLE SHEETS =================
+NO_RESPONDEN = ["Apagado", "Fuera de servicio", "No contestó", "Número errado"]
+
+# ================= 2. CONEXIÓN Y FUNCIONES DE DATOS =================
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
 
 @st.cache_resource
 def conectar_sheets():
-    """Se conecta a Google usando las credenciales guardadas en Secrets."""
     creds_dict = dict(st.secrets["gcp_service_account"])
     creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
     return gspread.authorize(creds).open("GestionAliados")
 
 def leer_hoja(nombre_hoja):
-    """Lee los datos de la hoja y los limpia para evitar errores de columnas vacías."""
     try:
         sh = conectar_sheets()
         ws = sh.worksheet(nombre_hoja)
-        lista_datos = ws.get_all_values()
-        if not lista_datos:
-            return pd.DataFrame()
-        
-        # Usamos la primera fila como encabezados
-        df = pd.DataFrame(lista_datos[1:], columns=lista_datos[0])
-        # Limpiamos nombres de columnas (quitar espacios y poner en minúscula)
-        df.columns = [c.strip().lower() for c in df.columns]
+        data = ws.get_all_values()
+        if len(data) < 1: return pd.DataFrame()
+        df = pd.DataFrame(data[1:], columns=[c.strip().lower() for c in data[0]])
         return df
-    except Exception as e:
-        st.error(f"Error leyendo la hoja {nombre_hoja}: {e}")
-        return pd.DataFrame()
+    except: return pd.DataFrame()
 
-def escribir_historial(fila):
-    """Guarda una nueva línea en la hoja de HISTORICO."""
+def reemplazar_hoja(nombre_hoja, df):
     sh = conectar_sheets()
-    ws = sh.worksheet("HISTORICO")
-    ws.append_row(fila, value_input_option="USER_ENTERED")
-
-def guardar_base_completa(df):
-    """Sobrescribe la hoja BASE con los datos actualizados."""
-    sh = conectar_sheets()
-    ws = sh.worksheet("BASE")
+    ws = sh.worksheet(nombre_hoja)
     ws.clear()
-    ws.update([df.columns.tolist()] + df.astype(str).values.tolist())
+    if not df.empty:
+        ws.update([df.columns.tolist()] + df.astype(str).values.tolist())
 
-# ================= 3. INTELIGENCIA DEL CRM (REGLAS AUTOMÁTICAS) =================
+def agregar_filas(nombre_hoja, rows):
+    sh = conectar_sheets()
+    ws = sh.worksheet(nombre_hoja)
+    ws.append_rows(rows, value_input_option="USER_ENTERED")
+
+# ================= 3. LÓGICA CRM Y PRIORIDADES =================
 
 def calcular_proxima_gestion(resultado, estado, razon, intentos):
-    """El sistema decide cuándo se debe volver a llamar al aliado."""
     hoy = datetime.now()
-
-    # REGLA: Si no le interesa o es empleado, NO se vuelve a llamar nunca
-    if estado in ["Aliado Rechaza la oferta", "Empleado", "Point"] or \
-       razon == "No le interesa / cuestiones personales":
+    if estado in ["Aliado Rechaza la oferta", "Empleado", "Point"] or razon == "No le interesa / cuestiones personales":
         return "NO_VOLVER"
-
-    # REGLA: Si no contestó o está apagado
-    if resultado in ["No contestó", "Apagado", "Fuera de servicio"]:
-        # Si ya lo intentamos 10 veces, lo pausamos 30 días
-        if intentos >= 10:
-            return (hoy + timedelta(days=30)).strftime("%Y-%m-%d")
-        
-        if resultado == "No contestó":
-            return (hoy + timedelta(days=1)).strftime("%Y-%m-%d")
-        return (hoy + timedelta(days=2)).strftime("%Y-%m-%d")
-
-    # REGLA: Interesados o temas de HUB (esperar 5 días)
+    if resultado in NO_RESPONDEN:
+        if intentos >= 10: return (hoy + timedelta(days=30)).strftime("%Y-%m-%d")
+        return (hoy + timedelta(days=1 if resultado == "No contestó" else 2)).strftime("%Y-%m-%d")
     if estado in ["Interesado llega a cargue", "Aliado Fleet/Delivery no acepta hub"]:
         return (hoy + timedelta(days=5)).strftime("%Y-%m-%d")
-
-    # Por defecto, llamar en 3 días
     return (hoy + timedelta(days=3)).strftime("%Y-%m-%d")
 
-def filtrar_por_recontacto(df):
-    """Oculta a los aliados que no deben ser llamados hoy."""
-    if df.empty or "proxima_gestion" not in df.columns:
-        return df
-    
-    # Quitar los que ya fueron descartados
-    df = df[df["proxima_gestion"].astype(str).str.upper() != "NO_VOLVER"]
-    
-    # Solo mostrar si la fecha de recontacto ya pasó o es hoy
-    df["_fecha_dt"] = pd.to_datetime(df["proxima_gestion"], errors="coerce")
-    mask = (df["_fecha_dt"].isna()) | (df["_fecha_dt"] <= datetime.now())
-    return df[mask].drop(columns=["_fecha_dt"])
+def prioridad_label(dias):
+    try: dias = int(dias)
+    except: return "🟢 BAJA"
+    if dias > 5: return "🔴 ALTA"
+    elif dias > 1: return "🟡 MEDIA"
+    return "🟢 BAJA"
 
-# ================= 4. INTERFAZ DE USUARIO =================
+def normalizar_vehiculo(v):
+    v = str(v).lower()
+    if any(k in v for k in ["carry", "largenvan", "large van", "small van", "van"]): return "Carry / Van"
+    if "moto" in v: return "Moto"
+    if any(k in v for k in ["camion", "camión", "truck", "npr"]): return "Camión"
+    return str(v).title()
 
-perfil = st.sidebar.selectbox("Seleccione Perfil", ["Analista", "Coordinador"])
+# ================= 4. PROCESAMIENTO DE BASE =================
 
-if perfil == "Analista":
-    st.header("📲 Gestión de Llamadas (CRM)")
+def cargar_base_preparada():
+    df = leer_hoja("BASE")
+    if df.empty: return df
     
-    # Cargamos datos actuales
-    base = leer_hoja("BASE")
-    historial = leer_hoja("HISTORICO")
+    # Alias de columnas
+    if "identificacion" not in df.columns:
+        for a in ["id_aliado", "cedula", "documento"]:
+            if a in df.columns: df.rename(columns={a: "identificacion"}, inplace=True)
     
-    if not base.empty:
-        nombre_analista = st.selectbox("Analista", ANALISTAS)
-        zona_trabajo = st.selectbox("Zona", sorted(base["zona"].unique()))
+    # Días sin cargar
+    if "fecha_ultimo_cargue" in df.columns:
+        df["_f_c"] = pd.to_datetime(df["fecha_ultimo_cargue"], errors="coerce")
+        df["dias"] = (datetime.now() - df["_f_c"]).dt.days.fillna(0).astype(int)
+    else: df["dias"] = 0
+    
+    # Vehículo
+    if "vehiculo" in df.columns:
+        df["vehiculo_norm"] = df["vehiculo"].apply(normalizar_vehiculo)
+    else: df["vehiculo_norm"] = "Sin Vehículo"
+    
+    # Asegurar columnas CRM
+    for c in ["intentos", "proxima_gestion", "zona"]:
+        if c not in df.columns: df[c] = 0 if c == "intentos" else ""
+    
+    return df
+
+# ================= 5. UI PRINCIPAL =================
+
+st.sidebar.title("Navegación")
+perfil = st.sidebar.radio("Ir a:", ["📊 Coordinador (KPIs)", "👨‍💻 Analistas"])
+
+base = cargar_base_preparada()
+hist = leer_hoja("HISTORICO")
+if not hist.empty: hist["fecha"] = pd.to_datetime(hist["fecha"], errors="coerce")
+
+# ----------------- PERFIL COORDINADOR -----------------
+if perfil == "📊 Coordinador (KPIs)":
+    st.title("📈 Panel de Control Estratégico")
+    
+    if not hist.empty:
+        hoy = hist[hist["fecha"].dt.date == datetime.now().date()]
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Llamadas Hoy", len(hoy))
+        contactados = len(hoy[hoy["resultado"] == "Sí contestó"])
+        c2.metric("% Contactabilidad", f"{(contactados/len(hoy)*100 if len(hoy)>0 else 0):.1f}%")
+        c3.metric("Interesados", len(hoy[hoy["estado"] == "Interesado llega a cargue"]))
         
-        # Filtramos el "Pool" para que el analista solo vea lo que toca llamar
-        pool = base[base["zona"] == zona_trabajo].copy()
-        pool_disponible = filtrar_por_recontacto(pool)
-        
-        st.info(f"Tienes {len(pool_disponible)} aliados pendientes para hoy en {zona_trabajo}.")
+        # Gráfica
+        prod = hoy.groupby("analista").size().reset_index(name='cuenta')
+        fig = px.bar(prod, x='analista', y='cuenta', title="Gestiones por Analista (Hoy)")
+        st.plotly_chart(fig, use_container_width=True)
 
-        if not pool_disponible.empty:
-            with st.form("formulario_llamada", clear_on_submit=True):
-                # Selección del aliado a gestionar
-                aliado_id = st.selectbox("Identificación del Aliado", pool_disponible["identificacion"].tolist())
+    tab_carga, tab_config = st.tabs(["📤 Cargar Base", "🎯 Asignación"])
+    
+    with tab_carga:
+        archivo = st.file_uploader("Subir Excel (.xlsx)", type=["xlsx"])
+        if archivo and st.button("🚀 Sincronizar Base en la Nube"):
+            df_nuevo = pd.read_excel(archivo).rename(columns=lambda x: str(x).lower().strip())
+            reemplazar_hoja("BASE", df_nuevo)
+            st.success("Base actualizada exitosamente.")
+
+    with tab_config:
+        st.subheader("Configurar asignación de hoy")
+        if not base.empty:
+            zonas = sorted(base["zona"].unique())
+            data_conf = []
+            for a in ANALISTAS.keys():
+                col1, col2 = st.columns(2)
+                z = col1.selectbox(f"Zona para {a}", zonas, key=f"z_{a}")
+                v = col2.selectbox(f"Vehículo para {a}", ["Carry / Van", "Moto", "Camión"], key=f"v_{a}")
+                data_conf.append({"analista": a, "zona": z, "vehiculo": v})
+            if st.button("💾 Guardar Reparto"):
+                reemplazar_hoja("CONFIG", pd.DataFrame(data_conf))
+                st.success("Asignación guardada.")
+
+# ----------------- PERFIL ANALISTA -----------------
+elif perfil == "👨‍💻 Analistas":
+    st.title("📞 Gestión de Aliados")
+    nombre = st.selectbox("Analista", list(ANALISTAS.keys()))
+    
+    # Leer configuración asignada
+    conf = leer_hoja("CONFIG")
+    mi_conf = conf[conf["analista"] == nombre]
+    
+    if not mi_conf.empty:
+        zona_asig = mi_conf.iloc[0]["zona"]
+        vh_asig = mi_conf.iloc[0]["vehiculo"]
+        st.success(f"🎯 Tu asignación: **{zona_asig}** | **{vh_asig}**")
+        
+        # Filtrar Pool (Inteligencia CRM + Prioridad)
+        pool = base[(base["zona"] == zona_asig) & (base["vehiculo_norm"] == vh_asig)].copy()
+        
+        # Filtro de disponibilidad
+        def esta_disponible(f):
+            if f == "" or pd.isna(f) or f == "NO_VOLVER": return f != "NO_VOLVER"
+            return pd.to_datetime(f).date() <= datetime.now().date()
+        
+        pool = pool[pool["proxima_gestion"].apply(esta_disponible)]
+        pool["PRIORIDAD"] = pool["dias"].apply(prioridad_label)
+        
+        st.info(f"Aliados disponibles para llamar ahora: **{len(pool)}**")
+
+        if not pool.empty:
+            with st.form("f_gestion", clear_on_submit=True):
+                aliado_id = st.selectbox("Seleccionar Aliado (ID)", pool["identificacion"].tolist())
                 
-                # --- MOSTRAR GESTIONES ANTERIORES ---
-                if not historial.empty and "identificacion" in historial.columns:
-                    previos = historial[historial["identificacion"].astype(str) == str(aliado_id)]
-                    if not previos.empty:
-                        st.subheader("📜 Historial de este aliado")
-                        st.table(previos.sort_values(previos.columns[0], ascending=False).head(3))
-                
-                st.markdown("---")
-                # Campos para llenar la nueva gestión
-                res = st.selectbox("Resultado de la llamada", RESULTADOS)
-                est = st.selectbox("Estado final", ["-"] + ESTADOS_FINALES)
+                # Historial rápido
+                if not hist.empty:
+                    h_a = hist[hist["identificacion"].astype(str) == str(aliado_id)].sort_values("fecha", ascending=False).head(2)
+                    if not h_a.empty: st.table(h_a[["fecha", "resultado", "obs"]])
+
+                res = st.selectbox("Resultado", RESULTADOS)
+                est = st.selectbox("Estado", ["-"] + ESTADOS_FINALES)
                 raz = st.selectbox("Razón", ["-"] + RAZONES)
-                obs = st.text_area("Observaciones de la llamada")
+                obs = st.text_area("Observación")
                 
-                if st.form_submit_button("Guardar y Siguiente"):
-                    # 1. Guardar en HISTORICO
-                    escribir_historial([str(datetime.now()), nombre_analista, aliado_id, res, est, raz, obs])
-                    
-                    # 2. Actualizar BASE (Inteligencia CRM)
-                    base["identificacion"] = base["identificacion"].astype(str)
-                    idx = base[base["identificacion"] == str(aliado_id)].index
-                    
-                    # Sumar intento y calcular fecha
-                    intentos_v = int(pd.to_numeric(base.loc[idx, "intentos"], errors='coerce').fillna(0).values[0]) + 1
-                    fecha_proxima = calcular_proxima_gestion(res, est, raz, intentos_v)
-                    
-                    # Actualizar fila en la tabla
-                    base.loc[idx, "intentos"] = intentos_v
-                    base.loc[idx, "proxima_gestion"] = fecha_proxima
-                    base.loc[idx, "ultimo_resultado"] = res
-                    base.loc[idx, "ultimo_estado"] = est
-                    base.loc[idx, "fecha_gestion"] = datetime.now().strftime("%Y-%m-%d %H:%M")
-                    
-                    # Guardar cambios en Google
-                    guardar_base_completa(base)
-                    
-                    st.success(f"Gestión guardada. ¡Siguiente aliado!")
-                    st.rerun()
-
-elif perfil == "Coordinador":
-    st.header("⚙️ Configuración y Carga de Datos")
-    archivo_excel = st.file_uploader("Subir base nueva (Excel)", type=["xlsx"])
-    
-    if archivo_excel:
-        df_nuevo = pd.read_excel(archivo_excel)
-        # Limpiar columnas del Excel subido
-        df_nuevo.columns = [str(c).strip().lower() for c in df_nuevo.columns]
-        
-        if st.button("Sincronizar Base Actual"):
-            base_actual = leer_hoja("BASE")
-            if not base_actual.empty:
-                # Evitar duplicados: Solo añadir identificaciones que NO existen
-                existentes = set(base_actual["identificacion"].astype(str))
-                nuevos_registros = df_nuevo[~df_nuevo["identificacion"].astype(str).isin(existentes)]
-                
-                base_final = pd.concat([base_actual, nuevos_registros], ignore_index=True)
-                guardar_base_completa(base_final)
-                st.success(f"Sincronización lista. Se agregaron {len(nuevos_registros)} aliados.")
-            else:
-                guardar_base_completa(df_nuevo)
-                st.success("Base creada desde cero.")
+                if st.form_submit_button("✅ Guardar"):
+                    if len(obs) < 5: st.error("Escribe una observación válida.")
+                    else:
+                        # 1. Histórico
+                        agregar_filas("HISTORICO", [[str(datetime.now()), nombre, aliado_id, res, est, raz, obs]])
+                        
+                        # 2. Actualizar Base Viva
+                        idx = base[base["identificacion"].astype(str) == str(aliado_id)].index
+                        intentos = int(pd.to_numeric(base.loc[idx, "intentos"], errors='coerce').fillna(0).values[0]) + 1
+                        proxima = calcular_proxima_gestion(res, est, raz, intentos)
+                        
+                        base.loc[idx, "intentos"] = intentos
+                        base.loc[idx, "proxima_gestion"] = proxima
+                        base.loc[idx, "ultimo_resultado"] = res
+                        base.loc[idx, "fecha_gestion"] = datetime.now().strftime("%Y-%m-%d")
+                        
+                        reemplazar_hoja("BASE", base)
+                        st.success("Gestión exitosa.")
+                        st.rerun()
