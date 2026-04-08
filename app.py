@@ -5,9 +5,9 @@ import gspread
 from google.oauth2.service_account import Credentials
 import plotly.express as px
 
-# ================= 1. CONFIGURACIÓN =================
 st.set_page_config(layout="wide", page_title="CRM Aliados v3.0", page_icon="🚚")
 
+# ================= CONSTANTES =================
 ANALISTAS = {
     "Deisy Liliana Garcia":  "dgarcia@clicoh.com",
     "Erica Tatiana Garzon":  "etgarzon@clicoh.com",
@@ -15,8 +15,8 @@ ANALISTAS = {
     "Carlos Andres Loaiza":  "cloaiza@clicoh.com",
 }
 NOMBRES_ANALISTAS = list(ANALISTAS.keys())
-RESULTADOS = ["Apagado", "Fuera de servicio", "No contestó", "Número errado", "Sí contestó"]
-ESTADOS_FINALES = [
+RESULTADOS       = ["Apagado", "Fuera de servicio", "No contestó", "Número errado", "Sí contestó"]
+ESTADOS_FINALES  = [
     "Aliado Rechaza la oferta",
     "Aliado Fleet/Delivery no acepta hub",
     "Interesado llega a cargue",
@@ -40,10 +40,9 @@ RAZONES = [
 NO_RESPONDEN      = ["Apagado", "Fuera de servicio", "No contestó", "Número errado"]
 NO_VOLVER_ESTADOS = ["Aliado Rechaza la oferta", "Empleado", "Point"]
 NO_VOLVER_RAZONES = ["No le interesa / cuestiones personales"]
-COLS_CRM = ["intentos", "ultimo_resultado", "ultimo_estado", "ultima_razon",
-            "fecha_gestion", "proxima_gestion"]
+COLS_CRM = ["intentos","ultimo_resultado","ultimo_estado","ultima_razon","fecha_gestion","proxima_gestion"]
 
-# ================= 2. GOOGLE SHEETS =================
+# ================= GOOGLE SHEETS — CONEXIÓN ÚNICA =================
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive",
@@ -52,44 +51,42 @@ SCOPES = [
 @st.cache_resource
 def conectar_sheets():
     try:
-        creds_dict = dict(st.secrets["gcp_service_account"])
-        creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
-        client = gspread.authorize(creds)
-        return client.open("GestionAliados")
+        creds = Credentials.from_service_account_info(
+            dict(st.secrets["gcp_service_account"]), scopes=SCOPES
+        )
+        return gspread.authorize(creds).open("GestionAliados")
     except Exception as e:
         st.error(f"Error conexión Sheets: {e}")
         return None
 
 def leer_hoja(nombre_hoja, esperado_cols=None):
+    """Lectura robusta: usa get_all_values para evitar problemas con columnas vacías."""
     try:
         sh = conectar_sheets()
         if sh is None:
             return pd.DataFrame(columns=esperado_cols or [])
-        ws = sh.worksheet(nombre_hoja)
-        all_values = ws.get_all_values()
-        if not all_values or len(all_values) < 1:
+        ws   = sh.worksheet(nombre_hoja)
+        vals = ws.get_all_values()
+        if not vals:
             return pd.DataFrame(columns=esperado_cols or [])
-        headers = all_values[0]
-        cleaned_headers = []
-        seen = {}
+        headers = vals[0]
+        # Limpiar encabezados
+        clean, seen = [], {}
         for h in headers:
             h = str(h).strip()
-            if h == "" or h.lower() == "none":
-                h = f"col{len(cleaned_headers)}"
+            if not h or h.lower() == "none":
+                h = f"_x{len(clean)}"
             if h in seen:
-                seen[h] += 1
-                h = f"{h}_{seen[h]}"
+                seen[h] += 1; h = f"{h}_{seen[h]}"
             else:
                 seen[h] = 0
-            cleaned_headers.append(h)
-        if len(all_values) < 2:
-            return pd.DataFrame(columns=cleaned_headers)
-        rows = all_values[1:]
-        n_cols = len(cleaned_headers)
-        rows = [row + [""] * (n_cols - len(row)) if len(row) < n_cols else row[:n_cols]
-                for row in rows]
-        df = pd.DataFrame(rows, columns=cleaned_headers)
-        df = df[[c for c in df.columns if not c.startswith("col")]]
+            clean.append(h)
+        if len(vals) < 2:
+            return pd.DataFrame(columns=clean)
+        n = len(clean)
+        rows = [r + [""]*(n-len(r)) if len(r)<n else r[:n] for r in vals[1:]]
+        df = pd.DataFrame(rows, columns=clean)
+        df = df[[c for c in df.columns if not c.startswith("_x")]]
         return df
     except Exception as e:
         st.warning(f"Aviso leyendo {nombre_hoja}: {e}")
@@ -98,10 +95,8 @@ def leer_hoja(nombre_hoja, esperado_cols=None):
 def agregar_filas(nombre_hoja, rows: list):
     try:
         sh = conectar_sheets()
-        if sh is None:
-            return
-        ws = sh.worksheet(nombre_hoja)
-        ws.append_rows(rows, value_input_option="USER_ENTERED")
+        if sh:
+            sh.worksheet(nombre_hoja).append_rows(rows, value_input_option="USER_ENTERED")
     except Exception as e:
         st.error(f"Error guardando en {nombre_hoja}: {e}")
 
@@ -117,621 +112,431 @@ def reemplazar_hoja(nombre_hoja, df: pd.DataFrame):
     except Exception as e:
         st.error(f"Error reemplazando {nombre_hoja}: {e}")
 
-# ================= 3. LÓGICA INCREMENTAL =================
-def procesar_subida_incremental(df_nuevo):
-    base_actual = leer_hoja("BASE")
-    df_nuevo = df_nuevo.copy()
-    df_nuevo.columns = df_nuevo.columns.str.strip().str.lower()
-    col_id = next(
-        (a for a in ["identificacion", "id_aliado", "id", "cedula", "documento"]
-         if a in df_nuevo.columns), None
-    )
-    if not col_id:
-        st.error("No se encontró columna de identificación en el archivo.")
-        return 0, 0
-    df_nuevo = df_nuevo.rename(columns={col_id: "identificacion"})
-    df_nuevo["identificacion"] = df_nuevo["identificacion"].astype(str)
-    if base_actual.empty:
-        for col in COLS_CRM:
-            df_nuevo[col] = 0 if col == "intentos" else ""
-        reemplazar_hoja("BASE", df_nuevo)
-        return len(df_nuevo), 0
-    base_actual["identificacion"] = base_actual["identificacion"].astype(str)
-    ids_viejos = set(base_actual["identificacion"].unique())
-    nuevos = df_nuevo[~df_nuevo["identificacion"].isin(ids_viejos)].copy()
-    for col in COLS_CRM:
-        nuevos[col] = 0 if col == "intentos" else ""
-    existentes_datos = df_nuevo[df_nuevo["identificacion"].isin(ids_viejos)].set_index("identificacion")
-    base_idx = base_actual.set_index("identificacion")
-    base_idx.update(existentes_datos)
-    base_actual = base_idx.reset_index()
-    base_final = pd.concat([base_actual, nuevos], ignore_index=True)
-    reemplazar_hoja("BASE", base_final)
-    return len(nuevos), len(existentes_datos)
+# ================= CACHÉ EN MEMORIA (evita llamadas repetidas a Sheets) =================
+# Se carga UNA VEZ por sesión y se actualiza solo cuando hay cambios reales.
 
-# ================= 4. LÓGICA CRM =================
-def calcular_proxima_gestion(resultado, estado, razon, intentos):
-    hoy = datetime.now()
-    estado = str(estado or "")
-    razon  = str(razon or "")
+def _get_base():
+    """Carga la base desde Sheets y la guarda en session_state."""
+    if "base_df" not in st.session_state or st.session_state.get("base_stale", True):
+        df = leer_hoja("BASE")
+        if df.empty:
+            st.session_state["base_df"] = None
+        else:
+            df.columns = df.columns.str.strip().str.lower()
+            if "identificacion" not in df.columns:
+                for a in ["id_aliado","id","cedula","documento"]:
+                    if a in df.columns: df["identificacion"] = df[a]; break
+            if "identificacion" not in df.columns:
+                st.session_state["base_df"] = None
+                st.session_state["base_stale"] = False
+                return None
+            if "celular" not in df.columns:
+                for a in ["telefono","tel","phone"]:
+                    if a in df.columns: df["celular"] = df[a]; break
+            if "zona" not in df.columns and "municipio" in df.columns:
+                df["zona"] = df["municipio"]
+            if "zona" not in df.columns:
+                df["zona"] = "Sin zona"
+            if "vehiculo" in df.columns:
+                df["vehiculo_norm"] = df["vehiculo"].apply(_norm_vh)
+            else:
+                df["vehiculo_norm"] = "Sin vehículo"
+            df["dias"] = 0
+            col_f = next((c for c in ["fecha_ultimo_cargue","fecha ultimo cargue","fechaultimocargue"]
+                          if c in df.columns), None)
+            if col_f:
+                df["_fc"] = pd.to_datetime(df[col_f].astype(str), errors="coerce")
+                df["dias"] = (datetime.now()-df["_fc"]).dt.days.fillna(0).astype(int)
+            elif "dias_desde_ult_srv." in df.columns:
+                df["dias"] = pd.to_numeric(df["dias_desde_ult_srv."], errors="coerce").fillna(0).astype(int)
+            for col in COLS_CRM:
+                if col not in df.columns:
+                    df[col] = 0 if col=="intentos" else ""
+            df["intentos"] = pd.to_numeric(df["intentos"], errors="coerce").fillna(0).astype(int)
+            st.session_state["base_df"] = df
+        st.session_state["base_stale"] = False
+    return st.session_state.get("base_df")
+
+def _get_hist():
+    """Carga el historial desde Sheets y lo guarda en session_state."""
+    if "hist_df" not in st.session_state or st.session_state.get("hist_stale", True):
+        cols = ["fecha","analista","identificacion","resultado","estado","razon","obs"]
+        df = leer_hoja("HISTORICO", cols)
+        if df.empty:
+            df = pd.DataFrame(columns=cols)
+        else:
+            for c in cols:
+                if c not in df.columns: df[c] = ""
+            df["fecha"] = pd.to_datetime(df["fecha"], errors="coerce")
+            df = df.dropna(subset=["fecha"])
+        st.session_state["hist_df"]   = df
+        st.session_state["hist_stale"] = False
+    return st.session_state["hist_df"]
+
+def _invalidar_hist():
+    """Marca el historial como desactualizado para que se recargue la próxima vez."""
+    st.session_state["hist_stale"] = True
+
+def _invalidar_base():
+    st.session_state["base_stale"] = True
+
+# ================= HELPERS CRM =================
+
+def _norm_vh(v):
+    v = str(v).lower()
+    if any(k in v for k in ["carry","largenvan","large van","small van","van"]): return "Carry / Van"
+    if "moto" in v: return "Moto"
+    if any(k in v for k in ["camion","camión","truck","npr"]): return "Camión"
+    return str(v).title()
+
+def _prio(dias):
+    try: dias=int(float(str(dias)))
+    except: return "🟢 BAJA"
+    if dias>5: return "🔴 ALTA"
+    if dias>1: return "🟡 MEDIA"
+    return "🟢 BAJA"
+
+def calcular_proxima(resultado, estado, razon, intentos):
+    hoy   = datetime.now()
+    estado = str(estado or ""); razon = str(razon or "")
     if estado in NO_VOLVER_ESTADOS or razon in NO_VOLVER_RAZONES:
         return "NO_VOLVER"
-    if resultado in ["No contestó", "Apagado", "Fuera de servicio", "Número errado"]:
-        if intentos >= 10:
-            return hoy + timedelta(days=30)
-        if resultado == "No contestó":
-            return hoy + timedelta(days=1)
+    if resultado in NO_RESPONDEN:
+        if intentos >= 10: return hoy + timedelta(days=30)
+        if resultado == "No contestó": return hoy + timedelta(days=1)
         return hoy + timedelta(days=2)
-    if estado in ["Interesado llega a cargue", "Aliado Fleet/Delivery no acepta hub"]:
+    if estado in ["Interesado llega a cargue","Aliado Fleet/Delivery no acepta hub"]:
         return hoy + timedelta(days=5)
     return hoy + timedelta(days=3)
 
-def prioridad_label(dias):
-    try:
-        dias = int(float(str(dias)))
-    except Exception:
-        return "🟢 BAJA"
-    if dias > 5:
-        return "🔴 ALTA"
-    elif dias > 1:
-        return "🟡 MEDIA"
-    return "🟢 BAJA"
+def filtrar_pool(df):
+    if "proxima_gestion" not in df.columns: return df
+    df = df.copy()
+    df = df[df["proxima_gestion"].astype(str).str.upper() != "NO_VOLVER"]
+    def disp(v):
+        v = str(v).strip()
+        if v in ("","nan","None","0"): return True
+        f = pd.to_datetime(v, errors="coerce")
+        return pd.isna(f) or f <= datetime.now()
+    return df[df["proxima_gestion"].apply(disp)]
 
-def normalizar_vehiculo(v):
-    v = str(v).lower()
-    if any(k in v for k in ["carry", "largenvan", "large van", "small van", "van"]):
-        return "Carry / Van"
-    elif "moto" in v:
-        return "Moto"
-    elif any(k in v for k in ["camion", "camión", "truck", "npr"]):
-        return "Camión"
-    return str(v).title()
+# ================= GUARDADO (actualiza caché local además de Sheets) =================
 
-# ================= 5. CARGA DE DATOS =================
-@st.cache_data(ttl=300)
-def cargar_base():
-    df = leer_hoja("BASE")
-    if df.empty:
-        return None
-    df.columns = df.columns.str.strip().str.lower()
-    if "identificacion" not in df.columns:
-        for alias in ["id_aliado", "id", "cedula", "documento"]:
-            if alias in df.columns:
-                df["identificacion"] = df[alias]
-                break
-    if "identificacion" not in df.columns:
-        return None
-    if "celular" not in df.columns:
-        for alias in ["telefono", "tel", "phone"]:
-            if alias in df.columns:
-                df["celular"] = df[alias]
-                break
-    if "zona" not in df.columns and "municipio" in df.columns:
-        df["zona"] = df["municipio"]
-    if "zona" not in df.columns:
-        df["zona"] = "Sin zona"
-    if "vehiculo" in df.columns:
-        df["vehiculo_norm"] = df["vehiculo"].apply(normalizar_vehiculo)
-    else:
-        df["vehiculo_norm"] = "Sin vehículo"
-    df["dias"] = 0
-    col_fecha = next(
-        (c for c in ["fecha_ultimo_cargue", "fecha ultimo cargue", "fechaultimocargue"]
-         if c in df.columns), None
-    )
-    if col_fecha:
-        df["_fecha_cargue"] = pd.to_datetime(df[col_fecha].astype(str), errors="coerce")
-        df["dias"] = (datetime.now() - df["_fecha_cargue"]).dt.days.fillna(0).astype(int)
-    elif "dias_desde_ult_srv." in df.columns:
-        df["dias"] = pd.to_numeric(df["dias_desde_ult_srv."], errors="coerce").fillna(0).astype(int)
-    for col in COLS_CRM:
-        if col not in df.columns:
-            df[col] = 0 if col == "intentos" else ""
-    df["intentos"] = pd.to_numeric(df["intentos"], errors="coerce").fillna(0).astype(int)
-    return df
-
-# FIX BUG 1 y 2: ttl=0 para que el histórico se recargue SIEMPRE fresco
-# Esto garantiza que al hacer rerun() después de guardar, mis_ids ya no incluye
-# el aliado recién gestionado y el resumen del día refleja la gestión.
-@st.cache_data(ttl=0)
-def cargar_hist():
-    cols_esperadas = ["fecha", "analista", "identificacion", "resultado", "estado", "razon", "obs"]
-    df = leer_hoja("HISTORICO", cols_esperadas)
-    if df.empty:
-        return pd.DataFrame(columns=cols_esperadas)
-    for col in cols_esperadas:
-        if col not in df.columns:
-            df[col] = ""
-    df["fecha"] = pd.to_datetime(df["fecha"], errors="coerce")
-    df = df.dropna(subset=["fecha"])
-    return df
-
-@st.cache_data(ttl=60)
-def cargar_reparto():
-    return leer_hoja("REPARTO", ["fecha", "analista", "identificacion"])
-
-def leer_config(nombre_analista):
-    df = leer_hoja("CONFIG", ["analista", "modo", "zona", "vehiculo"])
-    if df.empty or "analista" not in df.columns:
-        return "Analista decide", None, None
-    fila = df[df["analista"] == nombre_analista]
-    if not fila.empty:
-        r = fila.iloc[-1]
-        return r.get("modo", "Analista decide"), r.get("zona"), r.get("vehiculo")
-    fila_todos = df[df["analista"] == "TODOS"]
-    if not fila_todos.empty:
-        r = fila_todos.iloc[-1]
-        return r.get("modo", "Analista decide"), r.get("zona"), r.get("vehiculo")
-    return "Analista decide", None, None
-
-# ================= 6. GUARDADO =================
-def guardar_gestion(row_dict):
-    fila = [
-        str(row_dict.get("fecha", "")),
-        str(row_dict.get("analista", "")),
-        str(row_dict.get("identificacion", "")),
-        str(row_dict.get("resultado", "")),
-        str(row_dict.get("estado", "")),
-        str(row_dict.get("razon", "")),
-        str(row_dict.get("obs", "")),
-    ]
+def guardar_gestion(row):
+    fila = [str(row.get(k,"")) for k in ["fecha","analista","identificacion","resultado","estado","razon","obs"]]
     agregar_filas("HISTORICO", [fila])
-    # Limpiar caché del histórico para que se recargue inmediatamente
-    cargar_hist.clear()
+    # Actualizar caché local sin leer Sheets de nuevo
+    nuevo = pd.DataFrame([{
+        "fecha":          pd.to_datetime(row.get("fecha")),
+        "analista":       str(row.get("analista","")),
+        "identificacion": str(row.get("identificacion","")),
+        "resultado":      str(row.get("resultado","")),
+        "estado":         str(row.get("estado","")),
+        "razon":          str(row.get("razon","")),
+        "obs":            str(row.get("obs","")),
+    }])
+    if "hist_df" in st.session_state and not st.session_state["hist_df"].empty:
+        st.session_state["hist_df"] = pd.concat(
+            [st.session_state["hist_df"], nuevo], ignore_index=True
+        )
+    else:
+        st.session_state["hist_df"] = nuevo
+    st.session_state["hist_stale"] = False  # ya está actualizado localmente
 
-def actualizar_base(identificacion, resultado, estado, razon):
+def actualizar_base_crm(identificacion, resultado, estado, razon):
+    """Actualiza solo la fila del aliado en Sheets y en caché local."""
     df = leer_hoja("BASE")
     if df.empty or "identificacion" not in df.columns:
         return
     df["identificacion"] = df["identificacion"].astype(str)
     for col in COLS_CRM:
-        if col not in df.columns:
-            df[col] = 0 if col == "intentos" else ""
+        if col not in df.columns: df[col] = 0 if col=="intentos" else ""
     df["intentos"] = pd.to_numeric(df["intentos"], errors="coerce").fillna(0).astype(int)
-    idx = df[df["identificacion"] == str(identificacion)].index
-    if idx.empty:
-        return
-    intentos_nuevo = int(df.loc[idx[0], "intentos"]) + 1
-    proxima = calcular_proxima_gestion(resultado, estado, razon, intentos_nuevo)
-    df.loc[idx, "ultimo_resultado"] = str(resultado or "")
-    df.loc[idx, "ultimo_estado"]    = str(estado or "")
-    df.loc[idx, "ultima_razon"]     = str(razon or "")
-    df.loc[idx, "fecha_gestion"]    = str(datetime.now())
-    df.loc[idx, "intentos"]         = intentos_nuevo
-    df.loc[idx, "proxima_gestion"]  = str(proxima)
+    idx = df[df["identificacion"]==str(identificacion)].index
+    if idx.empty: return
+    intentos_n = int(df.loc[idx[0],"intentos"]) + 1
+    proxima    = calcular_proxima(resultado, estado, razon, intentos_n)
+    df.loc[idx,"ultimo_resultado"] = str(resultado or "")
+    df.loc[idx,"ultimo_estado"]    = str(estado or "")
+    df.loc[idx,"ultima_razon"]     = str(razon or "")
+    df.loc[idx,"fecha_gestion"]    = str(datetime.now())
+    df.loc[idx,"intentos"]         = intentos_n
+    df.loc[idx,"proxima_gestion"]  = str(proxima)
     reemplazar_hoja("BASE", df)
-    cargar_base.clear()
+    _invalidar_base()
 
-def filtrar_pool(df_pool):
-    if "proxima_gestion" not in df_pool.columns:
-        return df_pool
-    df_pool = df_pool.copy()
-    mask_no_volver = df_pool["proxima_gestion"].astype(str).str.upper() == "NO_VOLVER"
-    df_pool = df_pool[~mask_no_volver]
-    def es_disponible(val):
-        val = str(val).strip()
-        if val in ("", "nan", "None", "0"):
-            return True
-        try:
-            fecha = pd.to_datetime(val, errors="coerce")
-            if pd.isna(fecha):
-                return True
-            return fecha <= datetime.now()
-        except Exception:
-            return True
-    return df_pool[df_pool["proxima_gestion"].apply(es_disponible)]
+def procesar_incremental(df_nuevo):
+    base_actual = leer_hoja("BASE")
+    df_nuevo = df_nuevo.copy()
+    df_nuevo.columns = df_nuevo.columns.str.strip().str.lower()
+    col_id = next((a for a in ["identificacion","id_aliado","id","cedula","documento"]
+                   if a in df_nuevo.columns), None)
+    if not col_id:
+        st.error("No se encontró columna de identificación.")
+        return 0,0
+    df_nuevo = df_nuevo.rename(columns={col_id:"identificacion"})
+    df_nuevo["identificacion"] = df_nuevo["identificacion"].astype(str)
+    if base_actual.empty:
+        for col in COLS_CRM: df_nuevo[col] = 0 if col=="intentos" else ""
+        reemplazar_hoja("BASE", df_nuevo)
+        _invalidar_base()
+        return len(df_nuevo), 0
+    base_actual["identificacion"] = base_actual["identificacion"].astype(str)
+    ids_viejos = set(base_actual["identificacion"].unique())
+    nuevos = df_nuevo[~df_nuevo["identificacion"].isin(ids_viejos)].copy()
+    for col in COLS_CRM: nuevos[col] = 0 if col=="intentos" else ""
+    existentes = df_nuevo[df_nuevo["identificacion"].isin(ids_viejos)].set_index("identificacion")
+    base_idx   = base_actual.set_index("identificacion")
+    base_idx.update(existentes)
+    base_final = pd.concat([base_idx.reset_index(), nuevos], ignore_index=True)
+    reemplazar_hoja("BASE", base_final)
+    _invalidar_base()
+    return len(nuevos), len(existentes)
 
-def guardar_reparto(df_reparto):
-    reemplazar_hoja("REPARTO", df_reparto)
-    cargar_reparto.clear()
+def leer_config(analista):
+    df = leer_hoja("CONFIG", ["analista","modo","zona","vehiculo"])
+    if df.empty or "analista" not in df.columns: return "Analista decide",None,None
+    fila = df[df["analista"]==analista]
+    if not fila.empty:
+        r=fila.iloc[-1]; return r.get("modo","Analista decide"),r.get("zona"),r.get("vehiculo")
+    fila=df[df["analista"]=="TODOS"]
+    if not fila.empty:
+        r=fila.iloc[-1]; return r.get("modo","Analista decide"),r.get("zona"),r.get("vehiculo")
+    return "Analista decide",None,None
+
+def cargar_reparto():
+    return leer_hoja("REPARTO",["fecha","analista","identificacion"])
+
+def guardar_reparto(df):
+    reemplazar_hoja("REPARTO", df)
 
 # ================================================================
-#  UI PRINCIPAL
+# UI
 # ================================================================
-st.title("🚚 Gestión de Aliados")
-perfil = st.sidebar.selectbox("Perfil", ["Coordinador", "Analista"])
+st.title("🚚 CRM Gestión de Aliados v3.0")
+perfil = st.sidebar.selectbox("Perfil", ["Coordinador","Analista"])
 
 # ================================================================
-#  COORDINADOR
+# COORDINADOR
 # ================================================================
 if perfil == "Coordinador":
-    password = st.sidebar.text_input("Contraseña", type="password")
-    if password != "clicoh":
-        if password:
-            st.sidebar.error("Contraseña incorrecta")
+    pwd = st.sidebar.text_input("Contraseña", type="password")
+    if pwd != "clicoh":
+        if pwd: st.sidebar.error("Contraseña incorrecta")
         st.stop()
 
-    base = cargar_base()
-    hist = cargar_hist()
+    base = _get_base()
+    hist = _get_hist()
 
-    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
-        "📊 Hoy",
-        "📅 Histórico & KPIs",
-        "🔥 Estado CRM Base",
-        "📤 Cargar Base",
-        "🎯 Asignación Analistas",
-        "⚙️ Reglas Recontacto",
+    tab1,tab2,tab3,tab4,tab5,tab6 = st.tabs([
+        "📊 Hoy","📅 Histórico & KPIs","🔥 Estado CRM Base",
+        "📤 Cargar Base","🎯 Asignación","⚙️ Reglas",
     ])
 
-    # ─── TAB 1: HOY ───
+    # ─── HOY ───
     with tab1:
-        st.subheader("🕵️ Auditoría de Gestión Diaria")
+        st.subheader("Auditoría de Gestión")
         if hist.empty:
-            st.info("Aún no hay gestión registrada.")
+            st.info("Sin gestiones registradas.")
         else:
-            hist_valido = hist.dropna(subset=["fecha"])
-            col_fecha_sel, col_boton = st.columns([3, 1])
-            with col_fecha_sel:
-                fecha_auditoria = st.date_input(
-                    "📅 Seleccionar fecha a auditar",
-                    value=datetime.now().date(),
-                    max_value=datetime.now().date(),
-                )
-            with col_boton:
+            hv = hist.dropna(subset=["fecha"])
+            col_fd, col_bt = st.columns([3,1])
+            with col_fd:
+                fecha_aud = st.date_input("Fecha a auditar", value=datetime.now().date(),
+                                          max_value=datetime.now().date())
+            with col_bt:
                 st.markdown("<br>", unsafe_allow_html=True)
-                if st.button("📅 Ver Hoy"):
-                    fecha_auditoria = datetime.now().date()
+                if st.button("📅 Hoy"): fecha_aud = datetime.now().date()
 
-            hist_fecha = hist_valido[hist_valido["fecha"].dt.date == fecha_auditoria].copy()
-            hist_fecha = hist_fecha.sort_values("fecha", ascending=False)
-
-            if hist_fecha.empty:
-                st.warning(f"No se registraron gestiones el {fecha_auditoria.strftime('%d/%m/%Y')}.")
+            hf = hv[hv["fecha"].dt.date==fecha_aud].sort_values("fecha",ascending=False)
+            if hf.empty:
+                st.warning(f"Sin gestiones el {fecha_aud.strftime('%d/%m/%Y')}.")
             else:
-                es_hoy = (fecha_auditoria == datetime.now().date())
-                label_fecha = "hoy" if es_hoy else fecha_auditoria.strftime("%d/%m/%Y")
-                st.success(f"📋 Mostrando {len(hist_fecha)} gestiones del {label_fecha}")
-
-                total_dia   = len(hist_fecha)
-                si_cont     = len(hist_fecha[hist_fecha["resultado"] == "Sí contestó"])
-                inter_dia   = len(hist_fecha[hist_fecha["estado"] == "Interesado llega a cargue"])
-                rech_dia    = len(hist_fecha[hist_fecha["estado"] == "Aliado Rechaza la oferta"])
-                no_resp_dia = len(hist_fecha[hist_fecha["resultado"].isin(NO_RESPONDEN)])
-
-                c1, c2, c3, c4, c5 = st.columns(5)
-                c1.metric("📞 Llamadas",     total_dia)
-                c2.metric("✅ Contactados",  si_cont)
-                c3.metric("🚗 Interesados",  inter_dia)
-                c4.metric("❌ Rechazados",   rech_dia)
-                c5.metric("📵 No responden", no_resp_dia)
-
+                label = "hoy" if fecha_aud==datetime.now().date() else fecha_aud.strftime("%d/%m/%Y")
+                t=len(hf); sc=len(hf[hf["resultado"]=="Sí contestó"])
+                it=len(hf[hf["estado"]=="Interesado llega a cargue"])
+                rc=len(hf[hf["estado"]=="Aliado Rechaza la oferta"])
+                nr=len(hf[hf["resultado"].isin(NO_RESPONDEN)])
+                c1,c2,c3,c4,c5=st.columns(5)
+                c1.metric("📞 Llamadas",t); c2.metric("✅ Contactados",sc)
+                c3.metric("🚗 Interesados",it); c4.metric("❌ Rechazados",rc)
+                c5.metric("📵 No resp.",nr)
                 st.markdown("---")
-                prod_dia    = hist_fecha.groupby("analista").size().reset_index(name="llamadas")
-                inter_a_dia = (hist_fecha[hist_fecha["estado"] == "Interesado llega a cargue"]
-                               .groupby("analista").size().reset_index(name="interesados"))
-                tabla_prod  = prod_dia.merge(inter_a_dia, on="analista", how="left").fillna(0)
-                tabla_prod["interesados"]   = tabla_prod["interesados"].astype(int)
-                tabla_prod["% efectividad"] = (
-                    tabla_prod["interesados"] / tabla_prod["llamadas"] * 100
-                ).round(1)
-
-                def semaforo(row):
-                    if row["llamadas"] >= 30 and row["interesados"] >= 3:
-                        return "🟢"
-                    elif row["llamadas"] >= 15:
-                        return "🟡"
-                    return "🔴"
-
-                tabla_prod["estado"] = tabla_prod.apply(semaforo, axis=1)
-                st.subheader("📊 Productividad por analista")
-                st.dataframe(tabla_prod, use_container_width=True, hide_index=True)
-                fig_prod = px.bar(
-                    tabla_prod, x="analista", y="llamadas",
-                    color="% efectividad",
-                    title=f"Llamadas por Analista — {label_fecha}",
-                )
-                st.plotly_chart(fig_prod, use_container_width=True)
-
+                prod=hf.groupby("analista").size().reset_index(name="llamadas")
+                ia=hf[hf["estado"]=="Interesado llega a cargue"].groupby("analista").size().reset_index(name="interesados")
+                tp=prod.merge(ia,on="analista",how="left").fillna(0)
+                tp["interesados"]=tp["interesados"].astype(int)
+                tp["% efectividad"]=(tp["interesados"]/tp["llamadas"]*100).round(1)
+                tp["🚦"]=tp.apply(lambda r:"🟢" if r["llamadas"]>=30 and r["interesados"]>=3 else("🟡" if r["llamadas"]>=15 else "🔴"),axis=1)
+                st.dataframe(tp,use_container_width=True,hide_index=True)
+                st.plotly_chart(px.bar(tp,x="analista",y="llamadas",color="% efectividad",
+                                       title=f"Llamadas — {label}"),use_container_width=True)
                 st.markdown("---")
-                st.markdown("#### 🔍 Filtros de búsqueda")
-                f_col1, f_col2, f_col3 = st.columns(3)
-                with f_col1:
-                    ana_filtro = st.multiselect(
-                        "Filtrar por Analista",
-                        options=NOMBRES_ANALISTAS,
-                        default=NOMBRES_ANALISTAS,
-                        key="ana_filtro_hoy",
-                    )
-                with f_col2:
-                    res_filtro = st.multiselect(
-                        "Filtrar por Resultado",
-                        options=RESULTADOS,
-                        default=RESULTADOS,
-                        key="res_filtro_hoy",
-                    )
-                with f_col3:
-                    busqueda = st.text_input("Buscar por Cédula o ID", "", key="busqueda_hoy")
+                # Filtros
+                fa,fr,fb = st.columns(3)
+                with fa: af=st.multiselect("Analista",NOMBRES_ANALISTAS,default=NOMBRES_ANALISTAS,key="af_c")
+                with fr: rf=st.multiselect("Resultado",RESULTADOS,default=RESULTADOS,key="rf_c")
+                with fb: bus=st.text_input("Buscar cédula","",key="bus_c")
+                df_f=hf[hf["analista"].isin(af)&hf["resultado"].isin(rf)]
+                if bus: df_f=df_f[df_f["identificacion"].astype(str).str.contains(bus,na=False)]
+                st.dataframe(df_f[["fecha","analista","identificacion","resultado","estado","razon","obs"]].rename(
+                    columns={"fecha":"Fecha","analista":"Analista","identificacion":"Cédula",
+                             "resultado":"Resultado","estado":"Estado","razon":"Razón","obs":"Obs"}
+                ),use_container_width=True,hide_index=True)
+                st.download_button("📥 Descargar día (CSV)",
+                                   df_f.to_csv(index=False).encode("utf-8"),
+                                   f"gestion_{fecha_aud}.csv","text/csv")
 
-                df_filtrado = hist_fecha[
-                    (hist_fecha["analista"].isin(ana_filtro)) &
-                    (hist_fecha["resultado"].isin(res_filtro))
-                ]
-                if busqueda:
-                    df_filtrado = df_filtrado[
-                        df_filtrado["identificacion"].astype(str).str.contains(busqueda, na=False)
-                    ]
-
-                c1, c2, c3, c4 = st.columns(4)
-                c1.metric("Llamadas Filtradas", len(df_filtrado))
-                c2.metric("Sí Contestaron", len(df_filtrado[df_filtrado["resultado"] == "Sí contestó"]))
-                c3.metric("Interesados", len(df_filtrado[df_filtrado["estado"] == "Interesado llega a cargue"]))
-                ef = (
-                    round(
-                        len(df_filtrado[df_filtrado["estado"] == "Interesado llega a cargue"])
-                        / len(df_filtrado) * 100, 1
-                    )
-                    if len(df_filtrado) > 0 else 0
-                )
-                c4.metric("Efectividad", f"{ef}%")
-
-                st.markdown("---")
-                st.markdown("##### 📝 Detalle de todas las gestiones")
-                df_display = df_filtrado.copy()
-                df_display["Hora"] = df_display["fecha"].dt.strftime("%I:%M %p")
-                cols_finales  = ["Hora", "analista", "identificacion", "resultado", "estado", "razon", "obs"]
-                nombres_cols  = ["Hora", "Analista", "Cédula/ID", "Resultado", "Estado Final", "Razón", "Observaciones"]
-                cols_presentes = [c for c in cols_finales if c in df_display.columns]
-                nombres_presentes = [nombres_cols[cols_finales.index(c)] for c in cols_presentes]
-                st.dataframe(
-                    df_display[cols_presentes].rename(
-                        columns=dict(zip(cols_presentes, nombres_presentes))
-                    ),
-                    use_container_width=True,
-                    hide_index=True,
-                )
-                csv = df_display.to_csv(index=False).encode("utf-8")
-                st.download_button(
-                    label="📥 Descargar reporte del día (CSV)",
-                    data=csv,
-                    file_name=f"gestion_{fecha_auditoria.strftime('%Y-%m-%d')}.csv",
-                    mime="text/csv",
-                )
-
-    # ─── TAB 2: HISTÓRICO & KPIs ───
+    # ─── HISTÓRICO ───
     with tab2:
-        st.subheader("Histórico con KPIs")
+        st.subheader("Histórico & KPIs")
         if hist.empty:
-            st.info("No hay histórico aún.")
+            st.info("Sin historial.")
         else:
-            col_f1, col_f2 = st.columns(2)
-            with col_f1:
-                f1 = st.date_input("Desde", datetime.now().date() - timedelta(days=7))
-            with col_f2:
-                f2 = st.date_input("Hasta", datetime.now().date())
-
-            hist_valido2 = hist.dropna(subset=["fecha"])
-            d = hist_valido2[
-                (hist_valido2["fecha"].dt.date >= f1) &
-                (hist_valido2["fecha"].dt.date <= f2)
-            ]
-
+            hv2=hist.dropna(subset=["fecha"])
+            c1,c2=st.columns(2)
+            with c1: f1=st.date_input("Desde",datetime.now().date()-timedelta(days=7),key="h_f1")
+            with c2: f2=st.date_input("Hasta",datetime.now().date(),max_value=datetime.now().date(),key="h_f2")
+            d=hv2[(hv2["fecha"].dt.date>=f1)&(hv2["fecha"].dt.date<=f2)]
             if d.empty:
-                st.warning("No hay registros en el rango de fechas seleccionado.")
+                st.warning("Sin registros en ese rango.")
             else:
-                total   = len(d)
-                si_resp = d[d["resultado"] == "Sí contestó"]
-                no_resp = d[d["resultado"].isin(NO_RESPONDEN)]
-                gest    = len(si_resp)
-                inter   = len(d[d["estado"] == "Interesado llega a cargue"])
-                rech    = len(d[d["estado"] == "Aliado Rechaza la oferta"])
-
-                c1, c2, c3, c4, c5 = st.columns(5)
-                c1.metric("📞 Total",        total)
-                c2.metric("✅ Contactados",  gest)
-                c3.metric("% No responden",  f"{round(len(no_resp)/total*100,1) if total else 0}%")
-                c4.metric("% Gestión",       f"{round(gest/total*100,1) if total else 0}%")
-                c5.metric("% Interesados",   f"{round(inter/total*100,1) if total else 0}%")
-                c6, c7 = st.columns(2)
-                c6.metric("% Rechazados",            f"{round(rech/total*100,1) if total else 0}%")
-                c7.metric("% Rechazo (contactados)", f"{round(rech/gest*100,1) if gest else 0}%")
-
+                tot=len(d); sr=d[d["resultado"]=="Sí contestó"]; nr=d[d["resultado"].isin(NO_RESPONDEN)]
+                g=len(sr); it=len(d[d["estado"]=="Interesado llega a cargue"])
+                rc=len(d[d["estado"]=="Aliado Rechaza la oferta"])
+                c1,c2,c3,c4,c5=st.columns(5)
+                c1.metric("📞 Total",tot); c2.metric("✅ Contactados",g)
+                c3.metric("% No resp",f"{round(len(nr)/tot*100,1) if tot else 0}%")
+                c4.metric("% Gestión",f"{round(g/tot*100,1) if tot else 0}%")
+                c5.metric("% Interesados",f"{round(it/tot*100,1) if tot else 0}%")
+                c6,c7=st.columns(2)
+                c6.metric("% Rechazados",f"{round(rc/tot*100,1) if tot else 0}%")
+                c7.metric("% Rechazo/contacto",f"{round(rc/g*100,1) if g else 0}%")
                 st.markdown("---")
-                st.markdown("#### 📉 Embudo de conversión")
-                embudo = pd.DataFrame({
-                    "Etapa":    ["Llamados", "Contactados", "Interesados"],
-                    "Cantidad": [total, gest, inter],
-                    "%":        [
-                        100,
-                        round(gest/total*100, 1) if total else 0,
-                        round(inter/total*100, 1) if total else 0,
-                    ],
-                })
-                st.dataframe(embudo, use_container_width=True)
-                fig_emb = px.funnel(embudo, x="Cantidad", y="Etapa", title="Embudo de Conversión")
-                st.plotly_chart(fig_emb, use_container_width=True)
-
+                emb=pd.DataFrame({"Etapa":["Llamados","Contactados","Interesados"],
+                                  "Cantidad":[tot,g,it],
+                                  "%":[100,round(g/tot*100,1) if tot else 0,round(it/tot*100,1) if tot else 0]})
+                st.dataframe(emb,use_container_width=True)
+                st.plotly_chart(px.funnel(emb,x="Cantidad",y="Etapa",title="Embudo"),use_container_width=True)
                 st.markdown("---")
-                st.markdown("#### Estado final (sobre contactados)")
-                data_estado = [
-                    [e,
-                     len(si_resp[si_resp["estado"] == e]),
-                     round(len(si_resp[si_resp["estado"] == e]) / gest * 100, 1) if gest else 0]
-                    for e in ESTADOS_FINALES
-                ]
-                st.dataframe(pd.DataFrame(data_estado, columns=["Estado", "Cantidad", "%"]),
-                             use_container_width=True)
-
-                st.markdown("---")
-                st.markdown("#### Razones (sobre contactados)")
-                data_razon = [
-                    [r,
-                     len(si_resp[si_resp["razon"] == r]),
-                     round(len(si_resp[si_resp["razon"] == r]) / gest * 100, 1) if gest else 0]
-                    for r in RAZONES
-                ]
-                st.dataframe(pd.DataFrame(data_razon, columns=["Razón", "Cantidad", "%"]),
-                             use_container_width=True)
-
+                de=[[e,len(sr[sr["estado"]==e]),round(len(sr[sr["estado"]==e])/g*100,1) if g else 0]
+                    for e in ESTADOS_FINALES]
+                st.markdown("#### Estado final"); st.dataframe(pd.DataFrame(de,columns=["Estado","N","%"]),use_container_width=True)
+                dr=[[r,len(sr[sr["razon"]==r]),round(len(sr[sr["razon"]==r])/g*100,1) if g else 0]
+                    for r in RAZONES]
+                st.markdown("#### Razones"); st.dataframe(pd.DataFrame(dr,columns=["Razón","N","%"]),use_container_width=True)
                 st.markdown("---")
                 st.markdown("#### KPIs por analista")
-                prod    = d.groupby("analista").size().reset_index(name="llamadas")
-                gest_a  = d[d["resultado"] == "Sí contestó"].groupby("analista").size().reset_index(name="gestionadas")
-                int_a   = d[d["estado"] == "Interesado llega a cargue"].groupby("analista").size().reset_index(name="interesados")
-                rec_a   = d[d["estado"] == "Aliado Rechaza la oferta"].groupby("analista").size().reset_index(name="rechazados")
-                nor_a   = d[d["resultado"].isin(NO_RESPONDEN)].groupby("analista").size().reset_index(name="no_resp")
-                tabla_a = (prod.merge(gest_a, on="analista", how="left")
-                               .merge(int_a,  on="analista", how="left")
-                               .merge(rec_a,  on="analista", how="left")
-                               .merge(nor_a,  on="analista", how="left")
-                               .fillna(0))
-                for col in ["gestionadas", "interesados", "rechazados", "no_resp"]:
-                    tabla_a[col] = tabla_a[col].astype(int)
-                tabla_a["% gestión"]      = (tabla_a["gestionadas"] / tabla_a["llamadas"] * 100).round(1)
-                tabla_a["% interesados"]  = (tabla_a["interesados"] / tabla_a["llamadas"] * 100).round(1)
-                tabla_a["% rechazados"]   = (tabla_a["rechazados"]  / tabla_a["llamadas"] * 100).round(1)
-                tabla_a["% no responden"] = (tabla_a["no_resp"]     / tabla_a["llamadas"] * 100).round(1)
-                st.dataframe(tabla_a, use_container_width=True)
-                fig_an = px.bar(
-                    tabla_a, x="analista",
-                    y=["% gestión", "% interesados"],
-                    barmode="group", title="KPIs por Analista",
-                )
-                st.plotly_chart(fig_an, use_container_width=True)
-
+                pa=d.groupby("analista").size().reset_index(name="llamadas")
+                ga=d[d["resultado"]=="Sí contestó"].groupby("analista").size().reset_index(name="gest")
+                ia=d[d["estado"]=="Interesado llega a cargue"].groupby("analista").size().reset_index(name="inter")
+                ra=d[d["estado"]=="Aliado Rechaza la oferta"].groupby("analista").size().reset_index(name="rech")
+                na=d[d["resultado"].isin(NO_RESPONDEN)].groupby("analista").size().reset_index(name="noresp")
+                ta=(pa.merge(ga,on="analista",how="left").merge(ia,on="analista",how="left")
+                      .merge(ra,on="analista",how="left").merge(na,on="analista",how="left").fillna(0))
+                for c in ["gest","inter","rech","noresp"]: ta[c]=ta[c].astype(int)
+                ta["% gest"]=(ta["gest"]/ta["llamadas"]*100).round(1)
+                ta["% inter"]=(ta["inter"]/ta["llamadas"]*100).round(1)
+                ta["% rech"]=(ta["rech"]/ta["llamadas"]*100).round(1)
+                ta["% noresp"]=(ta["noresp"]/ta["llamadas"]*100).round(1)
+                st.dataframe(ta,use_container_width=True)
+                st.plotly_chart(px.bar(ta,x="analista",y=["% gest","% inter"],barmode="group"),use_container_width=True)
                 st.markdown("---")
-                st.markdown("#### 📈 Tendencia diaria en el período")
-                tend = d.groupby(d["fecha"].dt.date).size().reset_index(name="llamadas")
-                tend.columns = ["fecha", "llamadas"]
-                fig_tend = px.line(tend, x="fecha", y="llamadas", title="Llamadas por Día", markers=True)
-                st.plotly_chart(fig_tend, use_container_width=True)
+                tend=d.groupby(d["fecha"].dt.date).size().reset_index(name="n")
+                tend.columns=["fecha","llamadas"]
+                st.plotly_chart(px.line(tend,x="fecha",y="llamadas",title="Tendencia diaria",markers=True),use_container_width=True)
+                st.dataframe(d.sort_values("fecha",ascending=False),use_container_width=True)
+                st.download_button("📥 Descargar (CSV)",d.to_csv(index=False).encode("utf-8"),
+                                   f"historico_{f1}_{f2}.csv","text/csv")
 
-                st.markdown("---")
-                st.dataframe(d.sort_values("fecha", ascending=False), use_container_width=True)
-                csv_hist = d.to_csv(index=False).encode("utf-8")
-                st.download_button(
-                    label="📥 Descargar histórico filtrado (CSV)",
-                    data=csv_hist,
-                    file_name=f"historico_{f1}_{f2}.csv",
-                    mime="text/csv",
-                )
-
-    # ─── TAB 3: ESTADO CRM BASE ───
+    # ─── CRM BASE ───
     with tab3:
-        st.subheader("Estado actual de la base (vista CRM)")
-        if base is None:
-            st.warning("Carga la base primero en 📤 Cargar Base.")
-        else:
-            no_volver   = base[base["proxima_gestion"].astype(str).str.upper() == "NO_VOLVER"]
-            disponibles = filtrar_pool(base)
-            en_pausa    = base[
-                base["proxima_gestion"].astype(str).apply(
-                    lambda v: v not in ("", "nan", "None", "NO_VOLVER", "0") and
-                              pd.to_datetime(v, errors="coerce") is not pd.NaT and
-                              pd.to_datetime(v, errors="coerce") > datetime.now()
-                )
-            ]
-            c1, c2, c3, c4 = st.columns(4)
-            c1.metric("📦 Total base",          len(base))
-            c2.metric("✅ Disponibles ahora",   len(disponibles))
-            c3.metric("⏸ En pausa/recontacto", len(en_pausa))
-            c4.metric("🚫 No vuelven nunca",    len(no_volver))
-
-            st.markdown("---")
-            disponibles2 = disponibles.copy()
-            disponibles2["PRIORIDAD"] = disponibles2["dias"].apply(prioridad_label)
-            alta  = disponibles2[disponibles2["PRIORIDAD"] == "🔴 ALTA"]
-            media = disponibles2[disponibles2["PRIORIDAD"] == "🟡 MEDIA"]
-            baja  = disponibles2[disponibles2["PRIORIDAD"] == "🟢 BAJA"]
-            c1, c2, c3 = st.columns(3)
-            c1.metric("🔴 ALTA (>5 días)",   len(alta))
-            c2.metric("🟡 MEDIA (2-5 días)", len(media))
-            c3.metric("🟢 BAJA (0-1 días)",  len(baja))
-
-            st.markdown("---")
-            st.markdown("#### Aliados en pausa/recontacto programado")
-            if not en_pausa.empty:
-                cols_p = [c for c in ["identificacion", "mensajero", "celular", "zona",
-                                      "vehiculo", "intentos", "ultimo_resultado",
-                                      "ultimo_estado", "proxima_gestion"] if c in en_pausa.columns]
-                st.dataframe(en_pausa[cols_p].sort_values("proxima_gestion"),
-                             use_container_width=True)
-            else:
-                st.info("No hay aliados en pausa actualmente.")
-
-            st.markdown("---")
-            st.markdown("#### Aliados bloqueados permanentemente")
-            if not no_volver.empty:
-                cols_nv = [c for c in ["identificacion", "mensajero", "celular",
-                                       "ultimo_estado", "ultima_razon"] if c in no_volver.columns]
-                st.dataframe(no_volver[cols_nv], use_container_width=True)
-            else:
-                st.info("No hay aliados bloqueados.")
-
-    # ─── TAB 4: CARGAR BASE ───
-    with tab4:
-        st.subheader("📤 Carga de Base")
-        modo_carga = st.radio(
-            "Modo de carga",
-            ["🔄 Incremental (recomendado)", "♻️ Reemplazar toda la base"],
-        )
-        archivo = st.file_uploader("Selecciona archivo Excel (.xlsx)", type=["xlsx"])
-        if archivo:
-            try:
-                df_subido = pd.read_excel(archivo, engine="openpyxl")
-                st.success(f"Archivo leído: {len(df_subido):,} registros")
-                st.dataframe(df_subido.head(5), use_container_width=True)
-                if modo_carga == "🔄 Incremental (recomendado)":
-                    st.info("IDs nuevos → se añaden. IDs existentes → actualizan datos conservando historial CRM.")
-                    if st.button("🚀 Ejecutar Cruce Incremental"):
-                        with st.spinner("Procesando merge..."):
-                            n_nuevos, n_actualizados = procesar_subida_incremental(df_subido)
-                        st.success(f"✅ {n_nuevos} nuevos añadidos · {n_actualizados} actualizados.")
-                        cargar_base.clear()
-                else:
-                    st.warning("⚠️ Esto borrará toda la base actual.")
-                    if st.button("♻️ Reemplazar base completa"):
-                        with st.spinner("Subiendo base..."):
-                            reemplazar_hoja("BASE", df_subido)
-                            cargar_base.clear()
-                        st.success(f"✅ Base reemplazada — {len(df_subido):,} aliados.")
-            except Exception as e:
-                st.error(f"Error leyendo el archivo: {e}")
-        if base is not None:
-            st.info(f"Base activa: {len(base):,} aliados en Google Sheets.")
-
-    # ─── TAB 5: ASIGNACIÓN ───
-    with tab5:
-        st.subheader("Configurar modo de trabajo")
         if base is None:
             st.warning("Carga la base primero.")
         else:
-            zonas = sorted(base["zona"].dropna().unique())
-            vhs   = sorted(base["vehiculo_norm"].dropna().unique())
-            modo = st.selectbox("Modo de asignación", [
-                "Analista decide",
-                "Asignación general (todos igual)",
-                "Asignación por analista",
-            ])
-            data_conf = []
-            if modo == "Asignación general (todos igual)":
-                zona_g = st.selectbox("Zona para todos", zonas)
-                vh_g   = st.selectbox("Vehículo para todos", vhs)
-                data_conf = [{"analista": "TODOS", "modo": modo, "zona": zona_g, "vehiculo": vh_g}]
-            elif modo == "Asignación por analista":
-                for a in NOMBRES_ANALISTAS:
-                    st.markdown(f"{a}")
-                    col1, col2 = st.columns(2)
-                    with col1:
-                        z = st.selectbox("Zona", zonas, key=f"zona_{a}")
-                    with col2:
-                        v = st.selectbox("Vehículo", vhs, key=f"vh_{a}")
-                    data_conf.append({"analista": a, "modo": modo, "zona": z, "vehiculo": v})
-            else:
-                data_conf = [{"analista": "TODOS", "modo": "Analista decide", "zona": "", "vehiculo": ""}]
-            if st.button("💾 Guardar asignación"):
-                reemplazar_hoja("CONFIG", pd.DataFrame(data_conf))
-                st.success("Asignación guardada.")
-            df_conf = leer_hoja("CONFIG")
-            if not df_conf.empty:
-                st.markdown("---")
-                st.markdown("##### Configuración activa:")
-                st.dataframe(df_conf, use_container_width=True)
+            nv=base[base["proxima_gestion"].astype(str).str.upper()=="NO_VOLVER"]
+            disp=filtrar_pool(base)
+            def en_pausa(v):
+                v=str(v).strip()
+                if v in ("","nan","None","NO_VOLVER","0"): return False
+                f=pd.to_datetime(v,errors="coerce")
+                return not pd.isna(f) and f>datetime.now()
+            paus=base[base["proxima_gestion"].apply(en_pausa)]
+            c1,c2,c3,c4=st.columns(4)
+            c1.metric("📦 Total",len(base)); c2.metric("✅ Disponibles",len(disp))
+            c3.metric("⏸ En pausa",len(paus)); c4.metric("🚫 Bloqueados",len(nv))
+            st.markdown("---")
+            disp2=disp.copy(); disp2["PRIORIDAD"]=disp2["dias"].apply(_prio)
+            c1,c2,c3=st.columns(3)
+            c1.metric("🔴 ALTA",len(disp2[disp2["PRIORIDAD"]=="🔴 ALTA"]))
+            c2.metric("🟡 MEDIA",len(disp2[disp2["PRIORIDAD"]=="🟡 MEDIA"]))
+            c3.metric("🟢 BAJA",len(disp2[disp2["PRIORIDAD"]=="🟢 BAJA"]))
+            st.markdown("---")
+            if not paus.empty:
+                st.markdown("#### ⏸ En pausa")
+                cp=[c for c in ["identificacion","mensajero","celular","zona","vehiculo",
+                                 "intentos","ultimo_resultado","ultimo_estado","proxima_gestion"] if c in paus.columns]
+                st.dataframe(paus[cp].sort_values("proxima_gestion"),use_container_width=True)
+            if not nv.empty:
+                st.markdown("#### 🚫 Bloqueados permanentemente")
+                cnv=[c for c in ["identificacion","mensajero","celular","ultimo_estado","ultima_razon"] if c in nv.columns]
+                st.dataframe(nv[cnv],use_container_width=True)
 
-    # ─── TAB 6: REGLAS ───
+    # ─── CARGAR BASE ───
+    with tab4:
+        st.subheader("📤 Carga de Base")
+        modo=st.radio("Modo",["🔄 Incremental (recomendado)","♻️ Reemplazar toda la base"])
+        archivo=st.file_uploader("Excel (.xlsx)",type=["xlsx"])
+        if archivo:
+            try:
+                df_s=pd.read_excel(archivo,engine="openpyxl")
+                st.success(f"{len(df_s):,} registros leídos")
+                st.dataframe(df_s.head(5),use_container_width=True)
+                if modo=="🔄 Incremental (recomendado)":
+                    st.info("IDs nuevos → añaden. IDs existentes → actualizan datos, conservan CRM.")
+                    if st.button("🚀 Ejecutar Cruce Incremental"):
+                        with st.spinner("Procesando..."):
+                            nn,na=procesar_incremental(df_s)
+                        st.success(f"✅ {nn} nuevos · {na} actualizados")
+                else:
+                    st.warning("⚠️ Borrará toda la base actual.")
+                    if st.button("♻️ Reemplazar"):
+                        with st.spinner("Subiendo..."): reemplazar_hoja("BASE",df_s); _invalidar_base()
+                        st.success(f"✅ {len(df_s):,} aliados subidos.")
+            except Exception as e:
+                st.error(f"Error: {e}")
+        if base is not None:
+            st.info(f"Base activa: {len(base):,} aliados.")
+
+    # ─── ASIGNACIÓN ───
+    with tab5:
+        if base is None:
+            st.warning("Carga la base primero.")
+        else:
+            zonas=sorted(base["zona"].dropna().unique())
+            vhs=sorted(base["vehiculo_norm"].dropna().unique())
+            modo_a=st.selectbox("Modo",["Analista decide","Asignación general (todos igual)","Asignación por analista"])
+            dc=[]
+            if modo_a=="Asignación general (todos igual)":
+                zg=st.selectbox("Zona",zonas); vg=st.selectbox("Vehículo",vhs)
+                dc=[{"analista":"TODOS","modo":modo_a,"zona":zg,"vehiculo":vg}]
+            elif modo_a=="Asignación por analista":
+                for a in NOMBRES_ANALISTAS:
+                    st.markdown(f"**{a}**"); col1,col2=st.columns(2)
+                    with col1: z=st.selectbox("Zona",zonas,key=f"z_{a}")
+                    with col2: v=st.selectbox("Vehículo",vhs,key=f"v_{a}")
+                    dc.append({"analista":a,"modo":modo_a,"zona":z,"vehiculo":v})
+            else:
+                dc=[{"analista":"TODOS","modo":"Analista decide","zona":"","vehiculo":""}]
+            if st.button("💾 Guardar asignación"):
+                reemplazar_hoja("CONFIG",pd.DataFrame(dc)); st.success("Guardado.")
+            cf=leer_hoja("CONFIG")
+            if not cf.empty: st.dataframe(cf,use_container_width=True)
+
+    # ─── REGLAS ───
     with tab6:
-        st.subheader("⚙️ Reglas de recontacto automático")
         st.markdown("""
-| Resultado / Estado | Acción | Días espera |
+| Resultado / Estado | Acción | Días |
 |---|---|---|
 | No contestó | Recontacto | 1 día |
 | Apagado / Fuera de servicio | Recontacto | 2 días |
@@ -739,376 +544,214 @@ if perfil == "Coordinador":
 | Interesado llega a cargue | Pausa | 5 días |
 | Fleet no acepta HUB | Pausa | 5 días |
 | Interesado esporádico | Recontacto | 3 días |
-| Aliado Rechaza la oferta | ❌ Bloqueo permanente | Nunca |
-| Empleado / Point | ❌ Bloqueo permanente | Nunca |
-| No le interesa (razón) | ❌ Bloqueo permanente | Nunca |
+| Aliado Rechaza la oferta | ❌ Nunca | — |
+| Empleado / Point | ❌ Nunca | — |
+| No le interesa | ❌ Nunca | — |
         """)
-        st.info("Estas reglas se aplican automáticamente al guardar cada gestión.")
 
 # ================================================================
-#  ANALISTA
+# ANALISTA
 # ================================================================
 if perfil == "Analista":
-    base = cargar_base()
-    # FIX BUG 2 y 3: cargar hist siempre fresco para el analista
-    hist = cargar_hist()
+    base = _get_base()
+    hist = _get_hist()
 
     if base is None:
-        st.warning("⚠️ La coordinadora aún no ha cargado la base. Espera un momento.")
+        st.warning("⚠️ La coordinadora aún no ha cargado la base.")
         st.stop()
 
-    st.markdown("---")
-    nombre = st.selectbox("¿Quién eres?", NOMBRES_ANALISTAS)
+    nombre = st.sidebar.selectbox("¿Quién eres?", NOMBRES_ANALISTAS)
 
-    # FIX BUG 3: Agregar pestañas al módulo de analista
-    tab_gestion, tab_hoy, tab_historico = st.tabs([
-        "📞 Gestión del Día",
-        "📊 Mi Resumen de Hoy",
-        "📅 Mi Histórico",
-    ])
+    tab_g, tab_h, tab_his = st.tabs(["📞 Gestión del Día","📊 Mi Resumen de Hoy","📅 Mi Histórico"])
 
-    # ─── TAB GESTIÓN ───
-    with tab_gestion:
-        modo_conf, zona_conf, vh_conf = leer_config(nombre)
-        if modo_conf in ("Asignación general (todos igual)", "Asignación por analista") \
-                and zona_conf and vh_conf:
-            zona_sel = str(zona_conf)
-            vh_sel   = str(vh_conf)
-            st.success(f"🎯 Hoy debes gestionar: *{zona_sel}* — *{vh_sel}*")
+    # ─── GESTIÓN ───
+    with tab_g:
+        modo_c, zona_c, vh_c = leer_config(nombre)
+        if modo_c in ("Asignación general (todos igual)","Asignación por analista") and zona_c and vh_c:
+            zona_sel=str(zona_c); vh_sel=str(vh_c)
+            st.success(f"🎯 Hoy: **{zona_sel}** — **{vh_sel}**")
         else:
-            zonas    = sorted(base["zona"].dropna().unique())
-            vhs      = sorted(base["vehiculo_norm"].dropna().unique())
-            zona_sel = st.selectbox("Zona", zonas)
-            vh_sel   = st.selectbox("Vehículo", vhs)
+            zonas=sorted(base["zona"].dropna().unique())
+            vhs=sorted(base["vehiculo_norm"].dropna().unique())
+            zona_sel=st.selectbox("Zona",zonas); vh_sel=st.selectbox("Vehículo",vhs)
 
-        # Pool con CRM aplicado
-        mask = (base["zona"].astype(str) == str(zona_sel)) & \
-               (base["vehiculo_norm"].astype(str) == str(vh_sel))
-        pool = base[mask].copy()
-        pool = filtrar_pool(pool)
-
+        pool=(base[(base["zona"].astype(str)==zona_sel)&(base["vehiculo_norm"].astype(str)==vh_sel)].copy())
+        pool=filtrar_pool(pool)
         if pool.empty:
-            st.info("No hay aliados disponibles para esta zona/vehículo. Prueba otro filtro.")
-            st.stop()
+            st.info("No hay aliados disponibles para este filtro."); st.stop()
+        pool["PRIORIDAD"]=pool["dias"].apply(_prio)
+        op={"🔴 ALTA":0,"🟡 MEDIA":1,"🟢 BAJA":2}
+        pool["_o"]=pool["PRIORIDAD"].map(op).fillna(3)
+        pool=pool.sort_values("_o").drop(columns=["_o"]).reset_index(drop=True)
 
-        pool["PRIORIDAD"] = pool["dias"].apply(prioridad_label)
-        orden_prio = {"🔴 ALTA": 0, "🟡 MEDIA": 1, "🟢 BAJA": 2}
-        pool["_orden"] = pool["PRIORIDAD"].map(orden_prio).fillna(3)
-        pool = pool.sort_values("_orden").drop(columns=["_orden"]).reset_index(drop=True)
-
-        # Quitar ya gestionados hoy — usar hist recién cargado
+        # Quitar gestionados hoy (usando caché local)
         if not hist.empty:
-            hist_v = hist.dropna(subset=["fecha"])
-            gestionados_hoy = (hist_v[hist_v["fecha"].dt.date == datetime.now().date()]
-                               ["identificacion"].astype(str).tolist())
-            pool = pool[~pool["identificacion"].astype(str).isin(gestionados_hoy)]
+            hv=hist.dropna(subset=["fecha"])
+            gest_hoy=hv[hv["fecha"].dt.date==datetime.now().date()]["identificacion"].astype(str).tolist()
+            pool=pool[~pool["identificacion"].astype(str).isin(gest_hoy)]
 
-        col_cant, col_prio = st.columns(2)
-        with col_cant:
-            cant = st.number_input("Cantidad de aliados", min_value=10, max_value=300, value=30)
-        with col_prio:
-            filtro_prio = st.selectbox("Prioridad", [
-                "Todas (ALTA + MEDIA + BAJA)",
-                "Solo 🔴 ALTA",
-                "Solo 🟡 MEDIA",
-                "Solo 🟢 BAJA",
-            ])
-
-        if filtro_prio == "Solo 🔴 ALTA":
-            pool = pool[pool["PRIORIDAD"] == "🔴 ALTA"]
-        elif filtro_prio == "Solo 🟡 MEDIA":
-            pool = pool[pool["PRIORIDAD"] == "🟡 MEDIA"]
-        elif filtro_prio == "Solo 🟢 BAJA":
-            pool = pool[pool["PRIORIDAD"] == "🟢 BAJA"]
-
-        st.caption(f"Aliados disponibles en este filtro: *{len(pool)}*")
+        c1,c2=st.columns(2)
+        with c1: cant=st.number_input("Cantidad",min_value=10,max_value=300,value=30)
+        with c2:
+            fp=st.selectbox("Prioridad",["Todas (ALTA + MEDIA + BAJA)","Solo 🔴 ALTA","Solo 🟡 MEDIA","Solo 🟢 BAJA"])
+        if fp=="Solo 🔴 ALTA": pool=pool[pool["PRIORIDAD"]=="🔴 ALTA"]
+        elif fp=="Solo 🟡 MEDIA": pool=pool[pool["PRIORIDAD"]=="🟡 MEDIA"]
+        elif fp=="Solo 🟢 BAJA": pool=pool[pool["PRIORIDAD"]=="🟢 BAJA"]
+        st.caption(f"Disponibles: **{len(pool)}**")
 
         if st.button("🚀 Generar mis llamadas"):
-            hoy_str    = datetime.now().date().isoformat()
-            reparto_df = cargar_reparto()
-            if not reparto_df.empty and "fecha" in reparto_df.columns:
-                if len(reparto_df) > 0 and str(reparto_df["fecha"].iloc[0]) != hoy_str:
-                    reparto_df = pd.DataFrame(columns=["fecha", "analista", "identificacion"])
+            hoy_s=datetime.now().date().isoformat()
+            rep=cargar_reparto()
+            if not rep.empty and "fecha" in rep.columns:
+                if len(rep)>0 and str(rep["fecha"].iloc[0])!=hoy_s:
+                    rep=pd.DataFrame(columns=["fecha","analista","identificacion"])
             else:
-                reparto_df = pd.DataFrame(columns=["fecha", "analista", "identificacion"])
-
-            ya_asignados    = reparto_df[reparto_df["fecha"] == hoy_str]["identificacion"].astype(str).tolist()
-            pool_disponible = pool[~pool["identificacion"].astype(str).isin(ya_asignados)]
-            mi_bloque       = pool_disponible.head(int(cant)).reset_index(drop=True)
-
-            if mi_bloque.empty:
-                st.warning("⚠️ No hay más aliados disponibles. Prueba otra zona, prioridad o espera recontactos.")
+                rep=pd.DataFrame(columns=["fecha","analista","identificacion"])
+            ya=rep[rep["fecha"]==hoy_s]["identificacion"].astype(str).tolist()
+            bloque=pool[~pool["identificacion"].astype(str).isin(ya)].head(int(cant)).reset_index(drop=True)
+            if bloque.empty:
+                st.warning("Sin aliados disponibles en este filtro.")
             else:
-                nuevas_filas = []
-                for id_aliado in mi_bloque["identificacion"].astype(str):
-                    nuevas_filas.append([hoy_str, nombre, id_aliado])
-                reparto_final = pd.concat(
-                    [reparto_df, pd.DataFrame(nuevas_filas, columns=["fecha", "analista", "identificacion"])],
-                    ignore_index=True,
-                )
-                guardar_reparto(reparto_final)
-                st.session_state["pool_activo"] = mi_bloque
-                st.session_state["hechas"]      = st.session_state.get("hechas", 0)
-                st.success(f"✅ Se te asignaron {len(mi_bloque)} aliados únicos.")
+                nf=pd.DataFrame({"fecha":[hoy_s]*len(bloque),"analista":[nombre]*len(bloque),
+                                 "identificacion":bloque["identificacion"].astype(str).tolist()})
+                guardar_reparto(pd.concat([rep,nf],ignore_index=True))
+                st.session_state["pool_activo"]=bloque
+                st.session_state["hechas"]=0
+                st.success(f"✅ {len(bloque)} aliados asignados.")
                 st.rerun()
 
-        # ─── BLOQUE ASIGNADO ───
-        hoy_str        = datetime.now().date().isoformat()
-        reparto_actual = cargar_reparto()
+        # Pool activo — se basa en session_state, SIN leer Sheets
+        hoy_s=datetime.now().date().isoformat()
+        rep_act=cargar_reparto()
+        mis_ids=[]
+        if not rep_act.empty and "fecha" in rep_act.columns and "analista" in rep_act.columns:
+            mis_ids=rep_act[(rep_act["fecha"]==hoy_s)&(rep_act["analista"]==nombre)]["identificacion"].astype(str).tolist()
 
-        if not reparto_actual.empty and "fecha" in reparto_actual.columns and "analista" in reparto_actual.columns:
-            mis_ids = reparto_actual[
-                (reparto_actual["fecha"] == hoy_str) &
-                (reparto_actual["analista"] == nombre)
-            ]["identificacion"].astype(str).tolist()
+        # Quitar gestionados usando caché local (sin llamar Sheets)
+        if mis_ids and not hist.empty:
+            hv2=hist.dropna(subset=["fecha"])
+            gh=hv2[hv2["fecha"].dt.date==datetime.now().date()]["identificacion"].astype(str).tolist()
+            mis_ids=[i for i in mis_ids if i not in gh]
 
-            # FIX BUG 1: Quitar los ya gestionados usando hist fresco
-            # cargar_hist() tiene ttl=0 y se limpia en guardar_gestion(), por lo
-            # que siempre refleja el estado más reciente sin esperar ttl.
-            hist_fresco = cargar_hist()
-            if not hist_fresco.empty:
-                hist_vf = hist_fresco.dropna(subset=["fecha"])
-                gestionados_hoy_fresh = hist_vf[
-                    hist_vf["fecha"].dt.date == datetime.now().date()
-                ]["identificacion"].astype(str).tolist()
-                mis_ids = [i for i in mis_ids if i not in gestionados_hoy_fresh]
-
-            if mis_ids:
-                hechas    = st.session_state.get("hechas", 0)
-                restantes = len(mis_ids)
-                pct       = int(hechas / (hechas + restantes) * 100) if (hechas + restantes) > 0 else 0
-                st.progress(pct, text=f"Progreso: {hechas} gestionados / {restantes} pendientes")
-
-                mis_datos = base[base["identificacion"].astype(str).isin(mis_ids)].copy()
-                if "PRIORIDAD" not in mis_datos.columns:
-                    mis_datos["PRIORIDAD"] = mis_datos["dias"].apply(prioridad_label)
-
-                cols_ver = [c for c in ["identificacion", "mensajero", "celular", "zona",
-                                        "vehiculo", "dias", "intentos", "PRIORIDAD"]
-                            if c in mis_datos.columns]
-                st.markdown(f"#### 📋 Aliados pendientes ({restantes})")
-                st.dataframe(mis_datos[cols_ver], use_container_width=True)
-
-                st.markdown("---")
-                st.markdown("#### 📞 Registrar gestión")
-
-                with st.form(key="form_gestion", clear_on_submit=True):
-                    c1, c2 = st.columns(2)
-                    with c1:
-                        # FIX BUG 1: mis_ids ya viene filtrado sin los gestionados,
-                        # así el selectbox solo muestra aliados pendientes.
-                        aliado_sel  = st.selectbox("Cédula del aliado", mis_ids)
-                        res_llamada = st.selectbox("Resultado de la llamada", RESULTADOS)
-                    with c2:
-                        est_final = st.selectbox("Estado Final (solo si contestó)", ["-"] + ESTADOS_FINALES)
-                        raz_final = st.selectbox("Razón Detallada (solo si contestó)", ["-"] + RAZONES)
-
-                    fila_aliado = mis_datos[mis_datos["identificacion"].astype(str) == str(aliado_sel)]
-                    if not fila_aliado.empty:
-                        f         = fila_aliado.iloc[0]
-                        info_cols = [c for c in ["mensajero", "celular", "intentos", "PRIORIDAD"] if c in f.index]
-                        cols_info = st.columns(max(len(info_cols), 1))
-                        for i, col_name in enumerate(info_cols):
-                            cols_info[i].metric(col_name.capitalize(), str(f[col_name]))
-
-                    observacion = st.text_area("Observaciones adicionales")
-                    submitted = st.form_submit_button("💾 GUARDAR GESTIÓN")
-
-                if submitted:
-                    estado_real = None if est_final == "-" else est_final
-                    razon_real  = None if raz_final == "-" else raz_final
-                    if res_llamada == "Sí contestó" and estado_real is None:
-                        st.error("⚠️ Si el aliado contestó, selecciona un Estado final.")
-                    else:
-                        guardar_gestion({
-                            "fecha":          datetime.now(),
-                            "analista":       nombre,
-                            "identificacion": aliado_sel,
-                            "resultado":      res_llamada,
-                            "estado":         estado_real,
-                            "razon":          razon_real,
-                            "obs":            observacion,
-                        })
-                        with st.spinner("Actualizando estado CRM del aliado..."):
-                            actualizar_base(aliado_sel, res_llamada, estado_real, razon_real)
-                        st.session_state["hechas"] = st.session_state.get("hechas", 0) + 1
-                        st.success(f"✅ Gestión guardada para {aliado_sel}")
-                        st.rerun()
-            else:
-                st.info("✅ No tienes aliados pendientes en tu bloque actual. ¡Genera uno nuevo arriba!")
-
-    # ─── TAB HOY (FIX BUG 2) ───
-    # Este tab muestra de forma clara todo lo que el analista ha gestionado en el día actual.
-    with tab_hoy:
-        st.subheader(f"📊 Tus gestiones de hoy — {datetime.now().strftime('%d/%m/%Y')}")
-        hist_fresco2 = cargar_hist()
-
-        if hist_fresco2.empty:
-            st.info("Aún no has registrado gestiones hoy.")
-        else:
-            hist_vf2 = hist_fresco2.dropna(subset=["fecha"])
-            mis_hoy = hist_vf2[
-                (hist_vf2["analista"] == nombre) &
-                (hist_vf2["fecha"].dt.date == datetime.now().date())
-            ].copy()
-
-            if mis_hoy.empty:
-                st.info("Aún no has registrado gestiones hoy. ¡Empieza en la pestaña de Gestión!")
-            else:
-                total_h   = len(mis_hoy)
-                si_cont_h = len(mis_hoy[mis_hoy["resultado"] == "Sí contestó"])
-                inter_h   = len(mis_hoy[mis_hoy["estado"] == "Interesado llega a cargue"])
-                no_resp_h = len(mis_hoy[mis_hoy["resultado"].isin(NO_RESPONDEN)])
-
-                c1, c2, c3, c4 = st.columns(4)
-                c1.metric("📞 Llamadas realizadas", total_h)
-                c2.metric("✅ Contactados",          si_cont_h)
-                c3.metric("🚗 Interesados",          inter_h)
-                c4.metric("📵 No respondieron",      no_resp_h)
-
-                if total_h > 0:
-                    efectividad = round(inter_h / total_h * 100, 1)
-                    st.metric("% Efectividad", f"{efectividad}%")
-
-                st.markdown("---")
-                st.markdown("#### Detalle de gestiones")
-                mis_hoy["Hora"] = mis_hoy["fecha"].dt.strftime("%I:%M %p")
-                cols_mostrar = [c for c in ["Hora", "identificacion", "resultado", "estado", "razon", "obs"]
-                                if c in mis_hoy.columns]
-                st.dataframe(
-                    mis_hoy[cols_mostrar].rename(columns={
-                        "identificacion": "Cédula/ID",
-                        "resultado": "Resultado",
-                        "estado": "Estado Final",
-                        "razon": "Razón",
-                        "obs": "Observaciones",
-                    }),
-                    use_container_width=True,
-                    hide_index=True,
-                )
-
-                csv_hoy = mis_hoy.to_csv(index=False).encode("utf-8")
-                st.download_button(
-                    label="📥 Descargar mis gestiones de hoy (CSV)",
-                    data=csv_hoy,
-                    file_name=f"mis_gestiones_{datetime.now().strftime('%Y-%m-%d')}.csv",
-                    mime="text/csv",
-                )
-
-                # Gráfico de resultados del día
-                if total_h >= 3:
-                    st.markdown("---")
-                    resumen_res = mis_hoy.groupby("resultado").size().reset_index(name="cantidad")
-                    fig_res = px.pie(resumen_res, values="cantidad", names="resultado",
-                                     title="Distribución de resultados del día")
-                    st.plotly_chart(fig_res, use_container_width=True)
-
-    # ─── TAB HISTÓRICO (FIX BUG 3) ───
-    # Este tab permite al analista consultar sus gestiones de días anteriores.
-    with tab_historico:
-        st.subheader("📅 Mi Histórico de Gestiones")
-        hist_fresco3 = cargar_hist()
-
-        if hist_fresco3.empty:
-            st.info("Aún no hay historial de gestiones registradas.")
-        else:
-            hist_vf3 = hist_fresco3.dropna(subset=["fecha"])
-            mi_hist  = hist_vf3[hist_vf3["analista"] == nombre].copy()
-
-            if mi_hist.empty:
-                st.info("No tienes gestiones registradas aún.")
-            else:
-                st.markdown("#### Selecciona el rango de fechas")
-                col_f1, col_f2 = st.columns(2)
-                with col_f1:
-                    fecha_desde = st.date_input(
-                        "Desde",
-                        value=datetime.now().date() - timedelta(days=7),
-                        key="hist_ana_desde",
-                    )
-                with col_f2:
-                    fecha_hasta = st.date_input(
-                        "Hasta",
-                        value=datetime.now().date(),
-                        max_value=datetime.now().date(),
-                        key="hist_ana_hasta",
-                    )
-
-                mi_hist_filtrado = mi_hist[
-                    (mi_hist["fecha"].dt.date >= fecha_desde) &
-                    (mi_hist["fecha"].dt.date <= fecha_hasta)
-                ].copy()
-
-                if mi_hist_filtrado.empty:
-                    st.warning("No hay gestiones en el rango seleccionado.")
+        if mis_ids:
+            hechas=st.session_state.get("hechas",0)
+            rest=len(mis_ids)
+            pct=int(hechas/(hechas+rest)*100) if (hechas+rest)>0 else 0
+            st.progress(pct,text=f"Progreso: {hechas} gestionados / {rest} pendientes")
+            mis_datos=base[base["identificacion"].astype(str).isin(mis_ids)].copy()
+            if "PRIORIDAD" not in mis_datos.columns:
+                mis_datos["PRIORIDAD"]=mis_datos["dias"].apply(_prio)
+            cols_v=[c for c in ["identificacion","mensajero","celular","zona","vehiculo","dias","intentos","PRIORIDAD"]
+                    if c in mis_datos.columns]
+            st.markdown(f"#### 📋 Pendientes ({rest})")
+            st.dataframe(mis_datos[cols_v],use_container_width=True,hide_index=True)
+            st.markdown("---")
+            st.markdown("#### 📞 Registrar gestión")
+            with st.form("form_g",clear_on_submit=True):
+                c1,c2=st.columns(2)
+                with c1:
+                    ali=st.selectbox("Cédula del aliado",mis_ids)
+                    res=st.selectbox("Resultado",RESULTADOS)
+                with c2:
+                    est=st.selectbox("Estado final (si contestó)",["-"]+ESTADOS_FINALES)
+                    raz=st.selectbox("Razón (si contestó)",["-"]+RAZONES)
+                fd=mis_datos[mis_datos["identificacion"].astype(str)==str(ali)]
+                if not fd.empty:
+                    f=fd.iloc[0]
+                    ic=[c for c in ["mensajero","celular","intentos","PRIORIDAD"] if c in f.index]
+                    ci=st.columns(max(len(ic),1))
+                    for i,cn in enumerate(ic): ci[i].metric(cn.capitalize(),str(f[cn]))
+                obs=st.text_area("Observaciones")
+                sub=st.form_submit_button("💾 GUARDAR GESTIÓN")
+            if sub:
+                er=None if est=="-" else est
+                rr=None if raz=="-" else raz
+                if res=="Sí contestó" and er is None:
+                    st.error("Selecciona un Estado final.")
                 else:
-                    total_p   = len(mi_hist_filtrado)
-                    si_cont_p = len(mi_hist_filtrado[mi_hist_filtrado["resultado"] == "Sí contestó"])
-                    inter_p   = len(mi_hist_filtrado[mi_hist_filtrado["estado"] == "Interesado llega a cargue"])
-                    no_resp_p = len(mi_hist_filtrado[mi_hist_filtrado["resultado"].isin(NO_RESPONDEN)])
+                    guardar_gestion({"fecha":datetime.now(),"analista":nombre,
+                                     "identificacion":ali,"resultado":res,
+                                     "estado":er,"razon":rr,"obs":obs})
+                    with st.spinner("Actualizando CRM..."):
+                        actualizar_base_crm(ali,res,er,rr)
+                    st.session_state["hechas"]=st.session_state.get("hechas",0)+1
+                    st.success(f"✅ Guardado para {ali}")
+                    st.rerun()
+        else:
+            st.info("✅ Sin aliados pendientes. Genera un nuevo bloque arriba.")
 
-                    c1, c2, c3, c4 = st.columns(4)
-                    c1.metric("📞 Total llamadas",   total_p)
-                    c2.metric("✅ Contactados",       si_cont_p)
-                    c3.metric("🚗 Interesados",       inter_p)
-                    c4.metric("📵 No respondieron",   no_resp_p)
+    # ─── MI RESUMEN HOY ───
+    with tab_h:
+        st.subheader(f"Tus gestiones de hoy — {datetime.now().strftime('%d/%m/%Y')}")
+        h_local=_get_hist()
+        if h_local.empty:
+            st.info("Sin gestiones hoy.")
+        else:
+            hv3=h_local.dropna(subset=["fecha"])
+            mh=hv3[(hv3["analista"]==nombre)&(hv3["fecha"].dt.date==datetime.now().date())].copy()
+            if mh.empty:
+                st.info("Sin gestiones hoy. ¡Empieza en Gestión del Día!")
+            else:
+                t=len(mh); sc=len(mh[mh["resultado"]=="Sí contestó"])
+                it=len(mh[mh["estado"]=="Interesado llega a cargue"])
+                nr=len(mh[mh["resultado"].isin(NO_RESPONDEN)])
+                c1,c2,c3,c4=st.columns(4)
+                c1.metric("📞 Llamadas",t); c2.metric("✅ Contactados",sc)
+                c3.metric("🚗 Interesados",it); c4.metric("📵 No resp.",nr)
+                if t>0: st.metric("% Efectividad",f"{round(it/t*100,1)}%")
+                st.markdown("---")
+                mh["Hora"]=mh["fecha"].dt.strftime("%I:%M %p")
+                st.dataframe(mh[["Hora","identificacion","resultado","estado","razon","obs"]].rename(
+                    columns={"identificacion":"Cédula","resultado":"Resultado",
+                             "estado":"Estado","razon":"Razón","obs":"Obs"}
+                ),use_container_width=True,hide_index=True)
+                st.download_button("📥 Descargar",mh.to_csv(index=False).encode("utf-8"),
+                                   f"hoy_{datetime.now().date()}.csv","text/csv")
+                if t>=3:
+                    rr=mh.groupby("resultado").size().reset_index(name="n")
+                    st.plotly_chart(px.pie(rr,values="n",names="resultado",title="Distribución"),use_container_width=True)
 
-                    if total_p > 0:
-                        col_ef1, col_ef2 = st.columns(2)
-                        col_ef1.metric("% Contacto",     f"{round(si_cont_p/total_p*100,1)}%")
-                        col_ef2.metric("% Interesados",  f"{round(inter_p/total_p*100,1)}%")
-
+    # ─── MI HISTÓRICO ───
+    with tab_his:
+        st.subheader("Mi Histórico")
+        h_local2=_get_hist()
+        if h_local2.empty:
+            st.info("Sin historial.")
+        else:
+            hv4=h_local2.dropna(subset=["fecha"])
+            mhist=hv4[hv4["analista"]==nombre].copy()
+            if mhist.empty:
+                st.info("Sin gestiones registradas.")
+            else:
+                c1,c2=st.columns(2)
+                with c1: fd=st.date_input("Desde",datetime.now().date()-timedelta(days=7),key="mh_d")
+                with c2: fh=st.date_input("Hasta",datetime.now().date(),max_value=datetime.now().date(),key="mh_h")
+                mf=mhist[(mhist["fecha"].dt.date>=fd)&(mhist["fecha"].dt.date<=fh)].copy()
+                if mf.empty:
+                    st.warning("Sin gestiones en ese rango.")
+                else:
+                    t=len(mf); sc=len(mf[mf["resultado"]=="Sí contestó"])
+                    it=len(mf[mf["estado"]=="Interesado llega a cargue"])
+                    nr=len(mf[mf["resultado"].isin(NO_RESPONDEN)])
+                    c1,c2,c3,c4=st.columns(4)
+                    c1.metric("📞 Total",t); c2.metric("✅ Contactados",sc)
+                    c3.metric("🚗 Interesados",it); c4.metric("📵 No resp.",nr)
+                    if t>0:
+                        c5,c6=st.columns(2)
+                        c5.metric("% Contacto",f"{round(sc/t*100,1)}%")
+                        c6.metric("% Interesados",f"{round(it/t*100,1)}%")
+                    td=mf.groupby(mf["fecha"].dt.date).size().reset_index(name="n")
+                    td.columns=["fecha","llamadas"]
+                    st.plotly_chart(px.bar(td,x="fecha",y="llamadas",title="Mis llamadas por día"),use_container_width=True)
                     st.markdown("---")
-
-                    # Tendencia diaria en el período
-                    st.markdown("#### 📈 Llamadas por día")
-                    tend_ana = mi_hist_filtrado.groupby(
-                        mi_hist_filtrado["fecha"].dt.date
-                    ).size().reset_index(name="llamadas")
-                    tend_ana.columns = ["fecha", "llamadas"]
-                    fig_tend_ana = px.bar(
-                        tend_ana, x="fecha", y="llamadas",
-                        title="Mis llamadas por día",
-                        labels={"fecha": "Fecha", "llamadas": "Llamadas"},
-                    )
-                    st.plotly_chart(fig_tend_ana, use_container_width=True)
-
-                    # Detalle por día (expandible)
-                    st.markdown("---")
-                    st.markdown("#### 📋 Detalle por fecha")
-
-                    fechas_unicas = sorted(
-                        mi_hist_filtrado["fecha"].dt.date.unique(), reverse=True
-                    )
-                    for fecha_dia in fechas_unicas:
-                        registros_dia = mi_hist_filtrado[
-                            mi_hist_filtrado["fecha"].dt.date == fecha_dia
-                        ].copy()
-                        label_dia = (
-                            "🟢 Hoy" if fecha_dia == datetime.now().date()
-                            else fecha_dia.strftime("%A %d/%m/%Y").capitalize()
-                        )
-                        with st.expander(f"{label_dia} — {len(registros_dia)} gestiones"):
-                            registros_dia["Hora"] = registros_dia["fecha"].dt.strftime("%I:%M %p")
-                            cols_det = [c for c in ["Hora", "identificacion", "resultado", "estado", "razon", "obs"]
-                                        if c in registros_dia.columns]
-                            st.dataframe(
-                                registros_dia[cols_det].rename(columns={
-                                    "identificacion": "Cédula/ID",
-                                    "resultado": "Resultado",
-                                    "estado": "Estado Final",
-                                    "razon": "Razón",
-                                    "obs": "Observaciones",
-                                }),
-                                use_container_width=True,
-                                hide_index=True,
-                            )
-
-                    st.markdown("---")
-                    csv_hist_ana = mi_hist_filtrado.to_csv(index=False).encode("utf-8")
-                    st.download_button(
-                        label="📥 Descargar mi histórico (CSV)",
-                        data=csv_hist_ana,
-                        file_name=f"mi_historico_{fecha_desde}_{fecha_hasta}.csv",
-                        mime="text/csv",
-                    )
+                    for dia in sorted(mf["fecha"].dt.date.unique(),reverse=True):
+                        rd=mf[mf["fecha"].dt.date==dia].copy()
+                        lbl="🟢 Hoy" if dia==datetime.now().date() else dia.strftime("%A %d/%m/%Y").capitalize()
+                        with st.expander(f"{lbl} — {len(rd)} gestiones"):
+                            rd["Hora"]=rd["fecha"].dt.strftime("%I:%M %p")
+                            st.dataframe(rd[["Hora","identificacion","resultado","estado","razon","obs"]].rename(
+                                columns={"identificacion":"Cédula","resultado":"Resultado",
+                                         "estado":"Estado","razon":"Razón","obs":"Obs"}
+                            ),use_container_width=True,hide_index=True)
+                    st.download_button("📥 Descargar historial",mf.to_csv(index=False).encode("utf-8"),
+                                       f"historial_{fd}_{fh}.csv","text/csv")
