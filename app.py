@@ -4,8 +4,67 @@ from datetime import datetime, timedelta
 import gspread
 from google.oauth2.service_account import Credentials
 import plotly.express as px
+from streamlit_google_auth import Authenticate
 
 st.set_page_config(layout="wide", page_title="CRM Aliados v3.0", page_icon="🚚")
+
+# ================= AUTENTICACIÓN GOOGLE =================
+# Correos autorizados: coordinadora + analistas
+CORREOS_AUTORIZADOS = {
+    # Coordinadora
+    "laura@clicoh.com":          "Coordinador",
+    # Analistas
+    "dgarcia@clicoh.com":        "Analista",
+    "etgarzon@clicoh.com":       "Analista",
+    "dsuarez@clicoh.com":        "Analista",
+    "cloaiza@clicoh.com":        "Analista",
+}
+
+# Mapeo correo → nombre para los analistas
+CORREO_A_NOMBRE = {
+    "dgarcia@clicoh.com":  "Deisy Liliana Garcia",
+    "etgarzon@clicoh.com": "Erica Tatiana Garzon",
+    "dsuarez@clicoh.com":  "Dayan Stefany Suarez",
+    "cloaiza@clicoh.com":  "Carlos Andres Loaiza",
+}
+
+authenticator = Authenticate(
+    secret_credentials_path=None,           # usamos st.secrets directamente
+    cookie_name="crm_aliados_cookie",
+    cookie_key=st.secrets["cookie_secret"], # agrega cookie_secret en secrets.toml
+    redirect_uri=st.secrets.get("redirect_uri", "https://sistema-flotas-66fpcarmeuvnybmprg5egz.streamlit.app/"),
+    client_id=st.secrets["google_oauth"]["client_id"],
+    client_secret=st.secrets["google_oauth"]["client_secret"],
+)
+
+authenticator.check_authentification()
+
+if not st.session_state.get("connected", False):
+    st.title("🚚 CRM Gestión de Aliados")
+    st.markdown("### Inicia sesión con tu cuenta corporativa de Google")
+    authenticator.login()
+    st.stop()
+
+# Usuario autenticado
+user_email = st.session_state.get("user_info", {}).get("email", "").lower()
+user_name  = st.session_state.get("user_info", {}).get("name", user_email)
+
+if user_email not in CORREOS_AUTORIZADOS:
+    st.error(f"⛔ El correo **{user_email}** no tiene acceso a esta aplicación.")
+    st.markdown("Contacta al administrador si crees que es un error.")
+    authenticator.logout()
+    st.stop()
+
+perfil_auto = CORREOS_AUTORIZADOS[user_email]   # "Coordinador" o "Analista"
+nombre_auto = CORREO_A_NOMBRE.get(user_email, user_name)
+
+# Botón logout en sidebar
+with st.sidebar:
+    st.markdown(f"👤 **{user_name}**")
+    st.caption(f"📧 {user_email}")
+    st.caption(f"🔑 Perfil: **{perfil_auto}**")
+    st.markdown("---")
+    authenticator.logout()
 
 # ================= CONSTANTES =================
 ANALISTAS = {
@@ -15,8 +74,9 @@ ANALISTAS = {
     "Carlos Andres Loaiza":  "cloaiza@clicoh.com",
 }
 NOMBRES_ANALISTAS = list(ANALISTAS.keys())
-RESULTADOS       = ["Apagado", "Fuera de servicio", "No contestó", "Número errado", "Sí contestó"]
-ESTADOS_FINALES  = [
+
+RESULTADOS      = ["Apagado", "Fuera de servicio", "No contestó", "Número errado", "Sí contestó"]
+ESTADOS_FINALES = [
     "Aliado Rechaza la oferta",
     "Aliado Fleet/Delivery no acepta hub",
     "Interesado llega a cargue",
@@ -42,7 +102,7 @@ NO_VOLVER_ESTADOS = ["Aliado Rechaza la oferta", "Empleado", "Point"]
 NO_VOLVER_RAZONES = ["No le interesa / cuestiones personales"]
 COLS_CRM = ["intentos","ultimo_resultado","ultimo_estado","ultima_razon","fecha_gestion","proxima_gestion"]
 
-# ================= GOOGLE SHEETS — CONEXIÓN ÚNICA =================
+# ================= GOOGLE SHEETS =================
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive",
@@ -60,7 +120,6 @@ def conectar_sheets():
         return None
 
 def leer_hoja(nombre_hoja, esperado_cols=None):
-    """Lectura robusta: usa get_all_values para evitar problemas con columnas vacías."""
     try:
         sh = conectar_sheets()
         if sh is None:
@@ -70,7 +129,6 @@ def leer_hoja(nombre_hoja, esperado_cols=None):
         if not vals:
             return pd.DataFrame(columns=esperado_cols or [])
         headers = vals[0]
-        # Limpiar encabezados
         clean, seen = [], {}
         for h in headers:
             h = str(h).strip()
@@ -83,10 +141,10 @@ def leer_hoja(nombre_hoja, esperado_cols=None):
             clean.append(h)
         if len(vals) < 2:
             return pd.DataFrame(columns=clean)
-        n = len(clean)
+        n    = len(clean)
         rows = [r + [""]*(n-len(r)) if len(r)<n else r[:n] for r in vals[1:]]
-        df = pd.DataFrame(rows, columns=clean)
-        df = df[[c for c in df.columns if not c.startswith("_x")]]
+        df   = pd.DataFrame(rows, columns=clean)
+        df   = df[[c for c in df.columns if not c.startswith("_x")]]
         return df
     except Exception as e:
         st.warning(f"Aviso leyendo {nombre_hoja}: {e}")
@@ -103,8 +161,7 @@ def agregar_filas(nombre_hoja, rows: list):
 def reemplazar_hoja(nombre_hoja, df: pd.DataFrame):
     try:
         sh = conectar_sheets()
-        if sh is None:
-            return
+        if sh is None: return
         ws = sh.worksheet(nombre_hoja)
         ws.clear()
         if not df.empty:
@@ -112,11 +169,8 @@ def reemplazar_hoja(nombre_hoja, df: pd.DataFrame):
     except Exception as e:
         st.error(f"Error reemplazando {nombre_hoja}: {e}")
 
-# ================= CACHÉ EN MEMORIA (evita llamadas repetidas a Sheets) =================
-# Se carga UNA VEZ por sesión y se actualiza solo cuando hay cambios reales.
-
+# ================= CACHÉ EN MEMORIA =================
 def _get_base():
-    """Carga la base desde Sheets y la guarda en session_state."""
     if "base_df" not in st.session_state or st.session_state.get("base_stale", True):
         df = leer_hoja("BASE")
         if df.empty:
@@ -137,10 +191,7 @@ def _get_base():
                 df["zona"] = df["municipio"]
             if "zona" not in df.columns:
                 df["zona"] = "Sin zona"
-            if "vehiculo" in df.columns:
-                df["vehiculo_norm"] = df["vehiculo"].apply(_norm_vh)
-            else:
-                df["vehiculo_norm"] = "Sin vehículo"
+            df["vehiculo_norm"] = df["vehiculo"].apply(_norm_vh) if "vehiculo" in df.columns else "Sin vehículo"
             df["dias"] = 0
             col_f = next((c for c in ["fecha_ultimo_cargue","fecha ultimo cargue","fechaultimocargue"]
                           if c in df.columns), None)
@@ -150,18 +201,16 @@ def _get_base():
             elif "dias_desde_ult_srv." in df.columns:
                 df["dias"] = pd.to_numeric(df["dias_desde_ult_srv."], errors="coerce").fillna(0).astype(int)
             for col in COLS_CRM:
-                if col not in df.columns:
-                    df[col] = 0 if col=="intentos" else ""
+                if col not in df.columns: df[col] = 0 if col=="intentos" else ""
             df["intentos"] = pd.to_numeric(df["intentos"], errors="coerce").fillna(0).astype(int)
             st.session_state["base_df"] = df
         st.session_state["base_stale"] = False
     return st.session_state.get("base_df")
 
 def _get_hist():
-    """Carga el historial desde Sheets y lo guarda en session_state."""
     if "hist_df" not in st.session_state or st.session_state.get("hist_stale", True):
         cols = ["fecha","analista","identificacion","resultado","estado","razon","obs"]
-        df = leer_hoja("HISTORICO", cols)
+        df   = leer_hoja("HISTORICO", cols)
         if df.empty:
             df = pd.DataFrame(columns=cols)
         else:
@@ -169,19 +218,13 @@ def _get_hist():
                 if c not in df.columns: df[c] = ""
             df["fecha"] = pd.to_datetime(df["fecha"], errors="coerce")
             df = df.dropna(subset=["fecha"])
-        st.session_state["hist_df"]   = df
+        st.session_state["hist_df"]    = df
         st.session_state["hist_stale"] = False
     return st.session_state["hist_df"]
 
-def _invalidar_hist():
-    """Marca el historial como desactualizado para que se recargue la próxima vez."""
-    st.session_state["hist_stale"] = True
-
-def _invalidar_base():
-    st.session_state["base_stale"] = True
+def _invalidar_base(): st.session_state["base_stale"] = True
 
 # ================= HELPERS CRM =================
-
 def _norm_vh(v):
     v = str(v).lower()
     if any(k in v for k in ["carry","largenvan","large van","small van","van"]): return "Carry / Van"
@@ -197,10 +240,9 @@ def _prio(dias):
     return "🟢 BAJA"
 
 def calcular_proxima(resultado, estado, razon, intentos):
-    hoy   = datetime.now()
+    hoy    = datetime.now()
     estado = str(estado or ""); razon = str(razon or "")
-    if estado in NO_VOLVER_ESTADOS or razon in NO_VOLVER_RAZONES:
-        return "NO_VOLVER"
+    if estado in NO_VOLVER_ESTADOS or razon in NO_VOLVER_RAZONES: return "NO_VOLVER"
     if resultado in NO_RESPONDEN:
         if intentos >= 10: return hoy + timedelta(days=30)
         if resultado == "No contestó": return hoy + timedelta(days=1)
@@ -220,12 +262,10 @@ def filtrar_pool(df):
         return pd.isna(f) or f <= datetime.now()
     return df[df["proxima_gestion"].apply(disp)]
 
-# ================= GUARDADO (actualiza caché local además de Sheets) =================
-
+# ================= GUARDADO =================
 def guardar_gestion(row):
     fila = [str(row.get(k,"")) for k in ["fecha","analista","identificacion","resultado","estado","razon","obs"]]
     agregar_filas("HISTORICO", [fila])
-    # Actualizar caché local sin leer Sheets de nuevo
     nuevo = pd.DataFrame([{
         "fecha":          pd.to_datetime(row.get("fecha")),
         "analista":       str(row.get("analista","")),
@@ -236,18 +276,14 @@ def guardar_gestion(row):
         "obs":            str(row.get("obs","")),
     }])
     if "hist_df" in st.session_state and not st.session_state["hist_df"].empty:
-        st.session_state["hist_df"] = pd.concat(
-            [st.session_state["hist_df"], nuevo], ignore_index=True
-        )
+        st.session_state["hist_df"] = pd.concat([st.session_state["hist_df"], nuevo], ignore_index=True)
     else:
         st.session_state["hist_df"] = nuevo
-    st.session_state["hist_stale"] = False  # ya está actualizado localmente
+    st.session_state["hist_stale"] = False
 
 def actualizar_base_crm(identificacion, resultado, estado, razon):
-    """Actualiza solo la fila del aliado en Sheets y en caché local."""
     df = leer_hoja("BASE")
-    if df.empty or "identificacion" not in df.columns:
-        return
+    if df.empty or "identificacion" not in df.columns: return
     df["identificacion"] = df["identificacion"].astype(str)
     for col in COLS_CRM:
         if col not in df.columns: df[col] = 0 if col=="intentos" else ""
@@ -272,25 +308,22 @@ def procesar_incremental(df_nuevo):
     col_id = next((a for a in ["identificacion","id_aliado","id","cedula","documento"]
                    if a in df_nuevo.columns), None)
     if not col_id:
-        st.error("No se encontró columna de identificación.")
-        return 0,0
+        st.error("No se encontró columna de identificación."); return 0,0
     df_nuevo = df_nuevo.rename(columns={col_id:"identificacion"})
     df_nuevo["identificacion"] = df_nuevo["identificacion"].astype(str)
     if base_actual.empty:
         for col in COLS_CRM: df_nuevo[col] = 0 if col=="intentos" else ""
-        reemplazar_hoja("BASE", df_nuevo)
-        _invalidar_base()
+        reemplazar_hoja("BASE", df_nuevo); _invalidar_base()
         return len(df_nuevo), 0
     base_actual["identificacion"] = base_actual["identificacion"].astype(str)
     ids_viejos = set(base_actual["identificacion"].unique())
-    nuevos = df_nuevo[~df_nuevo["identificacion"].isin(ids_viejos)].copy()
+    nuevos     = df_nuevo[~df_nuevo["identificacion"].isin(ids_viejos)].copy()
     for col in COLS_CRM: nuevos[col] = 0 if col=="intentos" else ""
     existentes = df_nuevo[df_nuevo["identificacion"].isin(ids_viejos)].set_index("identificacion")
     base_idx   = base_actual.set_index("identificacion")
     base_idx.update(existentes)
     base_final = pd.concat([base_idx.reset_index(), nuevos], ignore_index=True)
-    reemplazar_hoja("BASE", base_final)
-    _invalidar_base()
+    reemplazar_hoja("BASE", base_final); _invalidar_base()
     return len(nuevos), len(existentes)
 
 def leer_config(analista):
@@ -311,20 +344,16 @@ def guardar_reparto(df):
     reemplazar_hoja("REPARTO", df)
 
 # ================================================================
-# UI
+# UI — título principal (ya autenticado)
 # ================================================================
 st.title("🚚 CRM Gestión de Aliados v3.0")
-perfil = st.sidebar.selectbox("Perfil", ["Coordinador","Analista"])
+
+perfil = perfil_auto   # viene del login Google, no del selectbox
 
 # ================================================================
 # COORDINADOR
 # ================================================================
 if perfil == "Coordinador":
-    pwd = st.sidebar.text_input("Contraseña", type="password")
-    if pwd != "clicoh":
-        if pwd: st.sidebar.error("Contraseña incorrecta")
-        st.stop()
-
     base = _get_base()
     hist = _get_hist()
 
@@ -347,7 +376,6 @@ if perfil == "Coordinador":
             with col_bt:
                 st.markdown("<br>", unsafe_allow_html=True)
                 if st.button("📅 Hoy"): fecha_aud = datetime.now().date()
-
             hf = hv[hv["fecha"].dt.date==fecha_aud].sort_values("fecha",ascending=False)
             if hf.empty:
                 st.warning(f"Sin gestiones el {fecha_aud.strftime('%d/%m/%Y')}.")
@@ -372,7 +400,6 @@ if perfil == "Coordinador":
                 st.plotly_chart(px.bar(tp,x="analista",y="llamadas",color="% efectividad",
                                        title=f"Llamadas — {label}"),use_container_width=True)
                 st.markdown("---")
-                # Filtros
                 fa,fr,fb = st.columns(3)
                 with fa: af=st.multiselect("Analista",NOMBRES_ANALISTAS,default=NOMBRES_ANALISTAS,key="af_c")
                 with fr: rf=st.multiselect("Resultado",RESULTADOS,default=RESULTADOS,key="rf_c")
@@ -419,11 +446,9 @@ if perfil == "Coordinador":
                 st.dataframe(emb,use_container_width=True)
                 st.plotly_chart(px.funnel(emb,x="Cantidad",y="Etapa",title="Embudo"),use_container_width=True)
                 st.markdown("---")
-                de=[[e,len(sr[sr["estado"]==e]),round(len(sr[sr["estado"]==e])/g*100,1) if g else 0]
-                    for e in ESTADOS_FINALES]
+                de=[[e,len(sr[sr["estado"]==e]),round(len(sr[sr["estado"]==e])/g*100,1) if g else 0] for e in ESTADOS_FINALES]
                 st.markdown("#### Estado final"); st.dataframe(pd.DataFrame(de,columns=["Estado","N","%"]),use_container_width=True)
-                dr=[[r,len(sr[sr["razon"]==r]),round(len(sr[sr["razon"]==r])/g*100,1) if g else 0]
-                    for r in RAZONES]
+                dr=[[r,len(sr[sr["razon"]==r]),round(len(sr[sr["razon"]==r])/g*100,1) if g else 0] for r in RAZONES]
                 st.markdown("#### Razones"); st.dataframe(pd.DataFrame(dr,columns=["Razón","N","%"]),use_container_width=True)
                 st.markdown("---")
                 st.markdown("#### KPIs por analista")
@@ -495,8 +520,7 @@ if perfil == "Coordinador":
                 if modo=="🔄 Incremental (recomendado)":
                     st.info("IDs nuevos → añaden. IDs existentes → actualizan datos, conservan CRM.")
                     if st.button("🚀 Ejecutar Cruce Incremental"):
-                        with st.spinner("Procesando..."):
-                            nn,na=procesar_incremental(df_s)
+                        with st.spinner("Procesando..."): nn,na=procesar_incremental(df_s)
                         st.success(f"✅ {nn} nuevos · {na} actualizados")
                 else:
                     st.warning("⚠️ Borrará toda la base actual.")
@@ -553,6 +577,8 @@ if perfil == "Coordinador":
 # ANALISTA
 # ================================================================
 if perfil == "Analista":
+    nombre = nombre_auto   # viene del login Google automáticamente
+
     base = _get_base()
     hist = _get_hist()
 
@@ -560,7 +586,7 @@ if perfil == "Analista":
         st.warning("⚠️ La coordinadora aún no ha cargado la base.")
         st.stop()
 
-    nombre = st.sidebar.selectbox("¿Quién eres?", NOMBRES_ANALISTAS)
+    st.sidebar.markdown(f"👤 Analista: **{nombre}**")
 
     tab_g, tab_h, tab_his = st.tabs(["📞 Gestión del Día","📊 Mi Resumen de Hoy","📅 Mi Histórico"])
 
@@ -584,7 +610,6 @@ if perfil == "Analista":
         pool["_o"]=pool["PRIORIDAD"].map(op).fillna(3)
         pool=pool.sort_values("_o").drop(columns=["_o"]).reset_index(drop=True)
 
-        # Quitar gestionados hoy (usando caché local)
         if not hist.empty:
             hv=hist.dropna(subset=["fecha"])
             gest_hoy=hv[hv["fecha"].dt.date==datetime.now().date()]["identificacion"].astype(str).tolist()
@@ -620,14 +645,11 @@ if perfil == "Analista":
                 st.success(f"✅ {len(bloque)} aliados asignados.")
                 st.rerun()
 
-        # Pool activo — se basa en session_state, SIN leer Sheets
         hoy_s=datetime.now().date().isoformat()
         rep_act=cargar_reparto()
         mis_ids=[]
         if not rep_act.empty and "fecha" in rep_act.columns and "analista" in rep_act.columns:
             mis_ids=rep_act[(rep_act["fecha"]==hoy_s)&(rep_act["analista"]==nombre)]["identificacion"].astype(str).tolist()
-
-        # Quitar gestionados usando caché local (sin llamar Sheets)
         if mis_ids and not hist.empty:
             hv2=hist.dropna(subset=["fecha"])
             gh=hv2[hv2["fecha"].dt.date==datetime.now().date()]["identificacion"].astype(str).tolist()
