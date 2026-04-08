@@ -393,7 +393,7 @@ def guardar_reparto(df_reparto):
 #  UI PRINCIPAL
 # ================================================================
 
-st.title("🚚 CRM Gestión de Aliados v3.0")
+st.title("🚚 Gestión de Aliados")
 perfil = st.sidebar.selectbox("Perfil", ["Coordinador", "Analista"])
 
 # ================================================================
