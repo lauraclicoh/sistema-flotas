@@ -4,23 +4,17 @@ from datetime import datetime, timedelta
 import gspread
 from google.oauth2.service_account import Credentials
 import plotly.express as px
-from streamlit_google_auth import Authenticate
 
 st.set_page_config(layout="wide", page_title="CRM Aliados v3.0", page_icon="🚚")
 
-# ================= AUTENTICACIÓN GOOGLE =================
-# Correos autorizados: coordinadora + analistas
+# ================= AUTENTICACIÓN NATIVA STREAMLIT =================
 CORREOS_AUTORIZADOS = {
-    # Coordinadora
-    "laura@clicoh.com":          "Coordinador",
-    # Analistas
-    "dgarcia@clicoh.com":        "Analista",
-    "etgarzon@clicoh.com":       "Analista",
-    "dsuarez@clicoh.com":        "Analista",
-    "cloaiza@clicoh.com":        "Analista",
+    "laura@clicoh.com":    "Coordinador",
+    "dgarcia@clicoh.com":  "Analista",
+    "etgarzon@clicoh.com": "Analista",
+    "dsuarez@clicoh.com":  "Analista",
+    "cloaiza@clicoh.com":  "Analista",
 }
-
-# Mapeo correo → nombre para los analistas
 CORREO_A_NOMBRE = {
     "dgarcia@clicoh.com":  "Deisy Liliana Garcia",
     "etgarzon@clicoh.com": "Erica Tatiana Garzon",
@@ -28,42 +22,33 @@ CORREO_A_NOMBRE = {
     "cloaiza@clicoh.com":  "Carlos Andres Loaiza",
 }
 
-authenticator = Authenticate(
-    cookie_name="crm_aliados_cookie",
-    cookie_key=st.secrets["cookie_secret"],
-    redirect_uri=st.secrets.get("redirect_uri", "https://sistema-flotas-66fpcarmeuvnybmprg5egz.streamlit.app/"),
-    client_id=st.secrets["google_oauth"]["client_id"],
-    client_secret=st.secrets["google_oauth"]["client_secret"],
-)
-
-authenticator.check_authentification()
-
-if not st.session_state.get("connected", False):
+if not st.user.is_logged_in:
     st.title("🚚 CRM Gestión de Aliados")
     st.markdown("### Inicia sesión con tu cuenta corporativa de Google")
-    authenticator.login()
+    if st.button("🔑 Iniciar sesión con Google"):
+        st.login("google")
     st.stop()
 
-# Usuario autenticado
-user_email = st.session_state.get("user_info", {}).get("email", "").lower()
-user_name  = st.session_state.get("user_info", {}).get("name", user_email)
+user_email = st.user.email.lower()
+user_name  = st.user.name
 
 if user_email not in CORREOS_AUTORIZADOS:
     st.error(f"⛔ El correo **{user_email}** no tiene acceso a esta aplicación.")
-    st.markdown("Contacta al administrador si crees que es un error.")
-    authenticator.logout()
+    st.info("Contacta al administrador si crees que es un error.")
+    if st.button("🚪 Cerrar sesión"):
+        st.logout()
     st.stop()
 
-perfil_auto = CORREOS_AUTORIZADOS[user_email]   # "Coordinador" o "Analista"
+perfil_auto = CORREOS_AUTORIZADOS[user_email]
 nombre_auto = CORREO_A_NOMBRE.get(user_email, user_name)
 
-# Botón logout en sidebar
 with st.sidebar:
     st.markdown(f"👤 **{user_name}**")
     st.caption(f"📧 {user_email}")
     st.caption(f"🔑 Perfil: **{perfil_auto}**")
     st.markdown("---")
-    authenticator.logout()
+    if st.button("🚪 Cerrar sesión"):
+        st.logout()
 
 # ================= CONSTANTES =================
 ANALISTAS = {
@@ -343,11 +328,12 @@ def guardar_reparto(df):
     reemplazar_hoja("REPARTO", df)
 
 # ================================================================
-# UI — título principal (ya autenticado)
+# UI PRINCIPAL
 # ================================================================
 st.title("🚚 CRM Gestión de Aliados v3.0")
 
-perfil = perfil_auto   # viene del login Google, no del selectbox
+perfil = perfil_auto
+nombre = nombre_auto
 
 # ================================================================
 # COORDINADOR
@@ -361,7 +347,6 @@ if perfil == "Coordinador":
         "📤 Cargar Base","🎯 Asignación","⚙️ Reglas",
     ])
 
-    # ─── HOY ───
     with tab1:
         st.subheader("Auditoría de Gestión")
         if hist.empty:
@@ -413,7 +398,6 @@ if perfil == "Coordinador":
                                    df_f.to_csv(index=False).encode("utf-8"),
                                    f"gestion_{fecha_aud}.csv","text/csv")
 
-    # ─── HISTÓRICO ───
     with tab2:
         st.subheader("Histórico & KPIs")
         if hist.empty:
@@ -446,9 +430,11 @@ if perfil == "Coordinador":
                 st.plotly_chart(px.funnel(emb,x="Cantidad",y="Etapa",title="Embudo"),use_container_width=True)
                 st.markdown("---")
                 de=[[e,len(sr[sr["estado"]==e]),round(len(sr[sr["estado"]==e])/g*100,1) if g else 0] for e in ESTADOS_FINALES]
-                st.markdown("#### Estado final"); st.dataframe(pd.DataFrame(de,columns=["Estado","N","%"]),use_container_width=True)
+                st.markdown("#### Estado final")
+                st.dataframe(pd.DataFrame(de,columns=["Estado","N","%"]),use_container_width=True)
                 dr=[[r,len(sr[sr["razon"]==r]),round(len(sr[sr["razon"]==r])/g*100,1) if g else 0] for r in RAZONES]
-                st.markdown("#### Razones"); st.dataframe(pd.DataFrame(dr,columns=["Razón","N","%"]),use_container_width=True)
+                st.markdown("#### Razones")
+                st.dataframe(pd.DataFrame(dr,columns=["Razón","N","%"]),use_container_width=True)
                 st.markdown("---")
                 st.markdown("#### KPIs por analista")
                 pa=d.groupby("analista").size().reset_index(name="llamadas")
@@ -473,7 +459,6 @@ if perfil == "Coordinador":
                 st.download_button("📥 Descargar (CSV)",d.to_csv(index=False).encode("utf-8"),
                                    f"historico_{f1}_{f2}.csv","text/csv")
 
-    # ─── CRM BASE ───
     with tab3:
         if base is None:
             st.warning("Carga la base primero.")
@@ -506,7 +491,6 @@ if perfil == "Coordinador":
                 cnv=[c for c in ["identificacion","mensajero","celular","ultimo_estado","ultima_razon"] if c in nv.columns]
                 st.dataframe(nv[cnv],use_container_width=True)
 
-    # ─── CARGAR BASE ───
     with tab4:
         st.subheader("📤 Carga de Base")
         modo=st.radio("Modo",["🔄 Incremental (recomendado)","♻️ Reemplazar toda la base"])
@@ -531,7 +515,6 @@ if perfil == "Coordinador":
         if base is not None:
             st.info(f"Base activa: {len(base):,} aliados.")
 
-    # ─── ASIGNACIÓN ───
     with tab5:
         if base is None:
             st.warning("Carga la base primero.")
@@ -556,7 +539,6 @@ if perfil == "Coordinador":
             cf=leer_hoja("CONFIG")
             if not cf.empty: st.dataframe(cf,use_container_width=True)
 
-    # ─── REGLAS ───
     with tab6:
         st.markdown("""
 | Resultado / Estado | Acción | Días |
@@ -576,8 +558,6 @@ if perfil == "Coordinador":
 # ANALISTA
 # ================================================================
 if perfil == "Analista":
-    nombre = nombre_auto   # viene del login Google automáticamente
-
     base = _get_base()
     hist = _get_hist()
 
@@ -585,11 +565,8 @@ if perfil == "Analista":
         st.warning("⚠️ La coordinadora aún no ha cargado la base.")
         st.stop()
 
-    st.sidebar.markdown(f"👤 Analista: **{nombre}**")
-
     tab_g, tab_h, tab_his = st.tabs(["📞 Gestión del Día","📊 Mi Resumen de Hoy","📅 Mi Histórico"])
 
-    # ─── GESTIÓN ───
     with tab_g:
         modo_c, zona_c, vh_c = leer_config(nombre)
         if modo_c in ("Asignación general (todos igual)","Asignación por analista") and zona_c and vh_c:
@@ -701,7 +678,6 @@ if perfil == "Analista":
         else:
             st.info("✅ Sin aliados pendientes. Genera un nuevo bloque arriba.")
 
-    # ─── MI RESUMEN HOY ───
     with tab_h:
         st.subheader(f"Tus gestiones de hoy — {datetime.now().strftime('%d/%m/%Y')}")
         h_local=_get_hist()
@@ -732,7 +708,6 @@ if perfil == "Analista":
                     rr=mh.groupby("resultado").size().reset_index(name="n")
                     st.plotly_chart(px.pie(rr,values="n",names="resultado",title="Distribución"),use_container_width=True)
 
-    # ─── MI HISTÓRICO ───
     with tab_his:
         st.subheader("Mi Histórico")
         h_local2=_get_hist()
