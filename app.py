@@ -297,6 +297,7 @@ def cargar_hist():
             df[col] = ""
 
     df["fecha"] = pd.to_datetime(df["fecha"], errors="coerce")
+    df = df.dropna(subset=["fecha"])   # eliminar filas sin fecha válida
     return df
 
 @st.cache_data(ttl=60)
@@ -424,7 +425,8 @@ if perfil == "Coordinador":
         if hist.empty:
             st.info("Aún no hay gestión registrada hoy.")
         else:
-            hoy = hist[hist["fecha"].dt.date == datetime.now().date()]
+            hist_valido2 = hist.dropna(subset=["fecha"])
+            hoy = hist_valido2[hist_valido2["fecha"].dt.date == datetime.now().date()]
             total   = len(hoy)
             gest    = len(hoy[hoy["resultado"] == "Sí contestó"])
             inter   = len(hoy[hoy["estado"]    == "Interesado llega a cargue"])
@@ -471,7 +473,12 @@ if perfil == "Coordinador":
             with col_f2:
                 f2 = st.date_input("Hasta", datetime.now().date())
 
-            d       = hist[(hist["fecha"].dt.date >= f1) & (hist["fecha"].dt.date <= f2)]
+            # Filtro seguro de fechas
+            hist_valido = hist.dropna(subset=["fecha"])
+            d = hist_valido[
+                (hist_valido["fecha"].dt.date >= f1) &
+                (hist_valido["fecha"].dt.date <= f2)
+            ]
             total   = len(d)
             si_resp = d[d["resultado"] == "Sí contestó"]
             no_resp = d[d["resultado"].isin(NO_RESPONDEN)]
@@ -753,7 +760,8 @@ if perfil == "Analista":
 
     # Quitar ya gestionados hoy
     if not hist.empty:
-        gestionados_hoy = (hist[hist["fecha"].dt.date == datetime.now().date()]
+        hist_v = hist.dropna(subset=["fecha"])
+        gestionados_hoy = (hist_v[hist_v["fecha"].dt.date == datetime.now().date()]
                            ["identificacion"].astype(str).tolist())
         pool = pool[~pool["identificacion"].astype(str).isin(gestionados_hoy)]
 
@@ -875,8 +883,9 @@ if perfil == "Analista":
 
     # Resumen del analista hoy
     if not hist.empty:
-        mis = hist[(hist["analista"] == nombre) &
-                   (hist["fecha"].dt.date == datetime.now().date())]
+        hist_v2 = hist.dropna(subset=["fecha"])
+        mis = hist_v2[(hist_v2["analista"] == nombre) &
+                      (hist_v2["fecha"].dt.date == datetime.now().date())]
         if not mis.empty:
             st.markdown("---")
             st.markdown(f"#### 📈 Tus gestiones de hoy ({len(mis)} registros)")
