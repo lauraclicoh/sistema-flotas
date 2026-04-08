@@ -4,4 +4,6 @@ openpyxl
 xlrd
 gspread
 google-auth
+google-auth-oauthlib
 plotly
+streamlit-google-auth
