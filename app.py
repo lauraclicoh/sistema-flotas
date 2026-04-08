@@ -29,9 +29,8 @@ CORREO_A_NOMBRE = {
 }
 
 authenticator = Authenticate(
-    secret_credentials_path=None,           # usamos st.secrets directamente
     cookie_name="crm_aliados_cookie",
-    cookie_key=st.secrets["cookie_secret"], # agrega cookie_secret en secrets.toml
+    cookie_key=st.secrets["cookie_secret"],
     redirect_uri=st.secrets.get("redirect_uri", "https://sistema-flotas-66fpcarmeuvnybmprg5egz.streamlit.app/"),
     client_id=st.secrets["google_oauth"]["client_id"],
     client_secret=st.secrets["google_oauth"]["client_secret"],
