@@ -5,7 +5,7 @@ import gspread
 from google.oauth2.service_account import Credentials
 import plotly.express as px
 
-st.set_page_config(layout="wide", page_title="🚚 Gestión Aliados programación", page_icon="🚚")
+st.set_page_config(layout="wide", page_title="🚚 Gestión Aliados Programación", page_icon="🚚")
 
 # ================= CONSTANTES =================
 ANALISTAS = {
@@ -430,7 +430,7 @@ def guardar_reparto(df):
 # ================================================================
 # UI — SELECCIÓN DE PERFIL
 # ================================================================
-st.title("🚚 CRM Gestión de Aliados v3.0")
+st.title("🚚 Gestión Aliados Programación")
 
 with st.sidebar:
     st.markdown("### 👤 Acceso")
