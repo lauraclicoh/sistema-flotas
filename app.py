@@ -60,11 +60,34 @@ def conectar_sheets():
         return None
 
 def _safe_str(val):
-    """Convierte cualquier valor a string seguro para Google Sheets."""
+    """Convierte cualquier valor a string seguro para Google Sheets.
+    Maneja: None, NaN, int64, float64, datetime, Timestamp, numpy types.
+    """
     if val is None:
         return ""
-    if isinstance(val, float) and pd.isna(val):
-        return ""
+    # Detectar NaN/NaT de cualquier tipo
+    try:
+        if pd.isna(val):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    # Timestamp / datetime → formato legible
+    if hasattr(val, "strftime"):
+        try:
+            return val.strftime("%Y-%m-%d")
+        except Exception:
+            return ""
+    # numpy int/float → evitar sufijos como np.int64(...)
+    try:
+        import numpy as np
+        if isinstance(val, (np.integer,)):
+            return str(int(val))
+        if isinstance(val, (np.floating,)):
+            return str(float(val))
+        if isinstance(val, np.bool_):
+            return str(bool(val))
+    except ImportError:
+        pass
     try:
         return str(val)
     except Exception:
@@ -407,7 +430,7 @@ def guardar_reparto(df):
 # ================================================================
 # UI — SELECCIÓN DE PERFIL
 # ================================================================
-st.title("🚚 Gestión de Aliados ")
+st.title("🚚 CRM Gestión de Aliados v3.0")
 
 with st.sidebar:
     st.markdown("### 👤 Acceso")
@@ -616,8 +639,9 @@ if perfil == "Coordinador":
         archivo=st.file_uploader("Excel (.xlsx)",type=["xlsx"])
         if archivo:
             try:
-                df_s=pd.read_excel(archivo,engine="openpyxl")
-                df_s=df_s.fillna("")   # limpiar NaN antes de procesar
+                # Leer todas las columnas como string para evitar errores de tipo
+                df_s = pd.read_excel(archivo, engine="openpyxl", dtype=str)
+                df_s = df_s.fillna("")
                 st.success(f"{len(df_s):,} registros leídos")
                 st.dataframe(df_s.head(5),use_container_width=True)
                 if "Incremental" in modo:
