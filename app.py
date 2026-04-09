@@ -98,6 +98,19 @@ def agregar_filas(nombre_hoja, rows: list):
     except Exception as e:
         st.error(f"Error guardando en {nombre_hoja}: {e}")
 
+def _df_a_lista(df: pd.DataFrame) -> list:
+    """Convierte DataFrame a lista de listas de strings, tolerando NaN y tipos mixtos."""
+    filas = []
+    for _, row in df.iterrows():
+        fila = []
+        for val in row:
+            if val is None or (isinstance(val, float) and pd.isna(val)):
+                fila.append("")
+            else:
+                fila.append(str(val))
+        filas.append(fila)
+    return filas
+
 def reemplazar_hoja(nombre_hoja, df: pd.DataFrame):
     try:
         sh = conectar_sheets()
@@ -105,7 +118,7 @@ def reemplazar_hoja(nombre_hoja, df: pd.DataFrame):
         ws = sh.worksheet(nombre_hoja)
         ws.clear()
         if not df.empty:
-            ws.update([df.columns.tolist()] + df.astype(str).values.tolist())
+            ws.update([df.columns.tolist()] + _df_a_lista(df))
     except Exception as e:
         st.error(f"Error reemplazando {nombre_hoja}: {e}")
 
