@@ -104,10 +104,17 @@ def _df_a_lista(df: pd.DataFrame) -> list:
     for _, row in df.iterrows():
         fila = []
         for val in row:
-            if val is None or (isinstance(val, float) and pd.isna(val)):
+            try:
+                if val is None:
+                    fila.append("")
+                elif isinstance(val, float) and pd.isna(val):
+                    fila.append("")
+                elif isinstance(val, pd.Timestamp):
+                    fila.append(val.strftime("%Y-%m-%d %H:%M:%S"))
+                else:
+                    fila.append(str(val))
+            except Exception:
                 fila.append("")
-            else:
-                fila.append(str(val))
         filas.append(fila)
     return filas
 
@@ -118,7 +125,8 @@ def reemplazar_hoja(nombre_hoja, df: pd.DataFrame):
         ws = sh.worksheet(nombre_hoja)
         ws.clear()
         if not df.empty:
-            ws.update([df.columns.tolist()] + _df_a_lista(df))
+            headers = [str(c) for c in df.columns.tolist()]
+            ws.update([headers] + _df_a_lista(df))
     except Exception as e:
         st.error(f"Error reemplazando {nombre_hoja}: {e}")
 
