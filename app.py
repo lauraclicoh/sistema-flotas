@@ -202,8 +202,11 @@ def _get_base():
             col_f = next((c for c in ["fecha_ultimo_cargue","fecha ultimo cargue","fechaultimocargue"]
                           if c in df.columns), None)
             if col_f:
-                df["_fc"] = pd.to_datetime(df[col_f].astype(str), errors="coerce")
-                df["dias"] = (datetime.now()-df["_fc"]).dt.days.fillna(0).astype(int)
+    col_vals = df[col_f]
+    if isinstance(col_vals, pd.DataFrame):
+        col_vals = col_vals.iloc[:, 0]  # si hay columnas duplicadas, toma la primera
+    df["_fc"] = pd.to_datetime(col_vals.astype(str), infer_datetime_format=True, errors="coerce")
+    df["dias"] = (datetime.now()-df["_fc"]).dt.days.fillna(0).astype(int)
             elif "dias_desde_ult_srv." in df.columns:
                 df["dias"] = pd.to_numeric(df["dias_desde_ult_srv."], errors="coerce").fillna(0).astype(int)
             # Columnas CRM
