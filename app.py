@@ -5,7 +5,7 @@ import gspread
 from google.oauth2.service_account import Credentials
 import plotly.express as px
 
-st.set_page_config(layout="wide", page_title="CRM Aliados v3.0", page_icon="🚚")
+st.set_page_config(layout="wide", page_title="Gestion Aliados", page_icon="🚚")
 
 # ================= CONSTANTES =================
 ANALISTAS = {
