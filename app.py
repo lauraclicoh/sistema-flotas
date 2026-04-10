@@ -483,7 +483,7 @@ if perfil == "Coordinador":
                     max_value=datetime.now().date(),
                     key="coord_fecha_aud"
                 )
-           with col_bt:
+    with col_bt:
                 st.markdown("<br>", unsafe_allow_html=True)
                 if st.button("📅 Hoy"):
                     st.session_state["_reset_fecha_aud"] = True
