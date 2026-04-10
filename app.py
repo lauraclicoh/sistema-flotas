@@ -476,16 +476,17 @@ if perfil == "Coordinador":
             hv = hist.dropna(subset=["fecha"])
             col_fd, col_bt = st.columns([3,1])
             with col_fd:
+                valor_fecha = datetime.now().date() if st.session_state.pop("_reset_fecha_aud", False) else datetime.now().date()
                 fecha_aud = st.date_input(
                     "📅 Fecha a auditar",
-                    value=datetime.now().date(),
+                    value=valor_fecha,
                     max_value=datetime.now().date(),
                     key="coord_fecha_aud"
                 )
-            with col_bt:
+           with col_bt:
                 st.markdown("<br>", unsafe_allow_html=True)
                 if st.button("📅 Hoy"):
-                    st.session_state["coord_fecha_aud"] = datetime.now().date()
+                    st.session_state["_reset_fecha_aud"] = True
                     st.rerun()
             hf = hv[hv["fecha"].dt.date==fecha_aud].sort_values("fecha",ascending=False)
             if hf.empty:
