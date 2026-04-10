@@ -203,7 +203,10 @@ def _get_base():
             col_f = next((c for c in ["fecha_ultimo_cargue","fecha ultimo cargue","fechaultimocargue"]
                           if c in df.columns), None)
             if col_f:
-                df["_fc"] = pd.to_datetime(df[col_f].astype(str), errors="coerce")
+                _serie = df[col_f]
+                if isinstance(_serie, pd.DataFrame):
+                    _serie = _serie.iloc[:, 0]
+                df["_fc"] = pd.to_datetime(_serie.astype(str).str.strip(), dayfirst=True, errors="coerce")
                 df["dias"] = (datetime.now()-df["_fc"]).dt.days.fillna(0).astype(int)
             elif "dias_desde_ult_srv." in df.columns:
                 df["dias"] = pd.to_numeric(df["dias_desde_ult_srv."], errors="coerce").fillna(0).astype(int)
