@@ -716,7 +716,9 @@ if perfil == "Analista":
         pool["_o"] = pool["PRIORIDAD"].map(op).fillna(3)
         pool = pool.sort_values("_o").drop(columns=["_o"]).reset_index(drop=True)
         if not hist.empty:
-            hv  = hist.dropna(subset=["fecha"])
+            hv = hist.copy()
+            hv["fecha"] = pd.to_datetime(hv["fecha"], errors="coerce")
+            hv = hv.dropna(subset=["fecha"])
             gh  = hv[hv["fecha"].dt.date==datetime.now().date()]["identificacion"].astype(str).tolist()
             pool = pool[~pool["identificacion"].astype(str).isin(gh)]
         c1,c2 = st.columns(2)
@@ -760,7 +762,9 @@ if perfil == "Analista":
             mis_ids = rep_act[(rep_act["fecha"]==hoy_s) &
                               (rep_act["analista"]==nombre)]["identificacion"].astype(str).tolist()
         if mis_ids and not hist.empty:
-            hv2    = hist.dropna(subset=["fecha"])
+            hv2 = hist.copy()
+            hv2["fecha"] = pd.to_datetime(hv2["fecha"], errors="coerce")
+            hv2 = hv2.dropna(subset=["fecha"])
             gh2    = hv2[hv2["fecha"].dt.date==datetime.now().date()]["identificacion"].astype(str).tolist()
             mis_ids = [i for i in mis_ids if i not in gh2]
         if mis_ids:
