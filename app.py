@@ -190,7 +190,12 @@ def _get_base():
 
 # ─── FIX 1: _get_hist ahora acepta parámetro force_reload ───
 def _get_hist(force_reload=False):
-    if force_reload or "hist_df" not in st.session_state or st.session_state.get("hist_stale", True):
+    import time
+    ahora = time.time()
+    ultima = st.session_state.get("hist_last_load", 0)
+    # Recargar desde Sheets si: se pide forzar, nunca se cargó,
+    # o han pasado más de 60 segundos desde la última carga
+    if force_reload or "hist_df" not in st.session_state or (ahora - ultima) > 60:
         cols = ["fecha","analista","identificacion","resultado","estado","razon","obs"]
         df   = leer_hoja("HISTORICO", cols)
         if df.empty:
@@ -200,8 +205,9 @@ def _get_hist(force_reload=False):
                 if c not in df.columns: df[c] = ""
             df["fecha"] = pd.to_datetime(df["fecha"], errors="coerce")
             df = df.dropna(subset=["fecha"])
-        st.session_state["hist_df"]    = df
-        st.session_state["hist_stale"] = False
+        st.session_state["hist_df"]       = df
+        st.session_state["hist_stale"]    = False
+        st.session_state["hist_last_load"] = ahora
     return st.session_state["hist_df"]
 
 def _invalidar_base():
@@ -398,10 +404,6 @@ with st.sidebar:
 # ================================================================
 if perfil == "Coordinador":
     base = _get_base()
-    # Forzar recarga de hist desde Sheets la primera vez de cada sesión
-    if "coord_session_init" not in st.session_state:
-        st.session_state["hist_stale"] = True
-        st.session_state["coord_session_init"] = True
     hist = _get_hist()
     tab1,tab2,tab3,tab4,tab5,tab6 = st.tabs([
         "📊 Hoy","📅 Histórico & KPIs","🔥 Estado CRM",
@@ -684,10 +686,6 @@ if perfil == "Coordinador":
 # ================================================================
 if perfil == "Analista":
     base = _get_base()
-    # Forzar recarga de hist desde Sheets la primera vez de cada sesión
-    if "analista_session_init" not in st.session_state:
-        st.session_state["hist_stale"] = True
-        st.session_state["analista_session_init"] = True
     hist = _get_hist()
     if base is None:
         st.warning("⚠️ La coordinadora aún no ha cargado la base. Espera un momento.")
