@@ -348,7 +348,10 @@ def procesar_incremental(df_nuevo):
     _invalidar_base()
     return len(nuevos), len(existentes_datos)
 def leer_config(analista):
-    df = leer_hoja("CONFIG", ["analista","modo","zona","vehiculo"])
+    # Cache CONFIG en session_state para evitar llamadas repetidas
+    if "config_df" not in st.session_state:
+        st.session_state["config_df"] = leer_hoja("CONFIG", ["analista","modo","zona","vehiculo"])
+    df = st.session_state["config_df"]
     if df.empty or "analista" not in df.columns:
         return "Analista decide", None, None
     fila = df[df["analista"]==analista]
@@ -361,9 +364,15 @@ def leer_config(analista):
         return r.get("modo","Analista decide"), r.get("zona"), r.get("vehiculo")
     return "Analista decide", None, None
 def cargar_reparto():
-    return leer_hoja("REPARTO", ["fecha","analista","identificacion"])
+    # Cache REPARTO en session_state — se invalida solo al guardar
+    if "reparto_df" not in st.session_state or st.session_state.get("reparto_stale", True):
+        st.session_state["reparto_df"] = leer_hoja("REPARTO", ["fecha","analista","identificacion"])
+        st.session_state["reparto_stale"] = False
+    return st.session_state["reparto_df"]
 def guardar_reparto(df):
     reemplazar_hoja("REPARTO", df)
+    st.session_state["reparto_df"] = df
+    st.session_state["reparto_stale"] = False
 # ================================================================
 # UI — SELECCIÓN DE PERFIL
 # ================================================================
@@ -389,6 +398,10 @@ with st.sidebar:
 # ================================================================
 if perfil == "Coordinador":
     base = _get_base()
+    # Forzar recarga de hist desde Sheets la primera vez de cada sesión
+    if "coord_session_init" not in st.session_state:
+        st.session_state["hist_stale"] = True
+        st.session_state["coord_session_init"] = True
     hist = _get_hist()
     tab1,tab2,tab3,tab4,tab5,tab6 = st.tabs([
         "📊 Hoy","📅 Histórico & KPIs","🔥 Estado CRM",
@@ -671,6 +684,10 @@ if perfil == "Coordinador":
 # ================================================================
 if perfil == "Analista":
     base = _get_base()
+    # Forzar recarga de hist desde Sheets la primera vez de cada sesión
+    if "analista_session_init" not in st.session_state:
+        st.session_state["hist_stale"] = True
+        st.session_state["analista_session_init"] = True
     hist = _get_hist()
     if base is None:
         st.warning("⚠️ La coordinadora aún no ha cargado la base. Espera un momento.")
