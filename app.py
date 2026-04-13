@@ -627,9 +627,10 @@ if perfil == "Coordinador":
                 dc=[{"analista":"TODOS","modo":"Analista decide","zona":"","vehiculo":""}]
             if st.button("💾 Guardar asignación"):
                 reemplazar_hoja("CONFIG",pd.DataFrame(dc))
-                st.session_state.pop("config_df", None)  # invalidar caché config
+                st.session_state["config_df"] = pd.DataFrame(dc)  # actualizar caché
                 st.success("Guardado.")
-            cf=leer_hoja("CONFIG")
+            # Usar caché de config en lugar de leer Sheets de nuevo
+            cf = st.session_state.get("config_df", pd.DataFrame())
             if not cf.empty:
                 st.markdown("---"); st.markdown("##### Configuración activa:")
                 st.dataframe(cf,use_container_width=True)
