@@ -649,15 +649,25 @@ if perfil == "Coordinador":
         if archivo:
             try:
                 df_s=pd.read_excel(archivo,engine="openpyxl")
-                # Convertir todo a string de forma segura (compatible con todas versiones pandas)
-                def _to_str(x):
+                # Quitar columnas sin nombre (Unnamed)
+                df_s = df_s[[c for c in df_s.columns if not str(c).startswith("Unnamed")]]
+                # Convertir todo a string de forma segura
+                def _to_str_upload(x):
                     if x is None: return ""
                     try:
                         if pd.isna(x): return ""
-                    except: pass
-                    if isinstance(x, float) and x == int(x): return str(int(x))
+                    except Exception: pass
+                    if hasattr(x, "strftime"):
+                        return x.strftime("%Y-%m-%d")
+                    try:
+                        import numpy as np
+                        if isinstance(x, (np.integer,)): return str(int(x))
+                        if isinstance(x, (np.floating,)):
+                            if pd.isna(x): return ""
+                            return str(int(x)) if x == int(x) else str(x)
+                    except Exception: pass
                     return str(x)
-                df_s = df_s.apply(lambda col: col.map(_to_str))
+                df_s = df_s.apply(lambda col: col.map(_to_str_upload))
                 st.success(f"{len(df_s):,} registros leídos")
                 st.dataframe(df_s.head(5),use_container_width=True)
                 if "Incremental" in modo:
