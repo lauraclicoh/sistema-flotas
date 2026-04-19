@@ -368,12 +368,30 @@ def procesar_incremental(df_nuevo):
 
     # --- Normalizar df_nuevo ---
     df_nuevo = df_nuevo.copy()
-    df_nuevo.columns = df_nuevo.columns.str.strip().str.lower()
 
-    col_id = next((a for a in ["identificacion","id_aliado","id","cedula","documento"]
-                   if a in df_nuevo.columns), None)
+    # Normalizar nombres de columnas: minúsculas, sin espacios extremos,
+    # espacios internos → guión bajo (ej: "id aliado" → "id_aliado")
+    df_nuevo.columns = (df_nuevo.columns
+                        .str.strip()
+                        .str.lower()
+                        .str.replace(r"\s+", "_", regex=True))
+
+    # Quitar columnas sin nombre ANTES de cualquier otra operación
+    df_nuevo = df_nuevo[[c for c in df_nuevo.columns
+                          if c and not c.startswith("unnamed") and c != "_"]]
+
+    # Deduplicar columnas conservando la primera ocurrencia
+    df_nuevo = df_nuevo.loc[:, ~df_nuevo.columns.duplicated()]
+
+    # Buscar columna de identificación con todos los alias posibles
+    ALIAS_ID = ["identificacion", "id_aliado", "id aliado", "id", "cedula",
+                "documento", "nro_identificacion", "numero_identificacion"]
+    col_id = next((a for a in ALIAS_ID if a in df_nuevo.columns), None)
     if not col_id:
-        st.error("No se encontró columna de identificación (Cédula/ID).")
+        st.error(
+            f"No se encontró columna de identificación. "
+            f"Columnas detectadas: {list(df_nuevo.columns)}"
+        )
         return 0, 0
 
     df_nuevo = df_nuevo.rename(columns={col_id: "identificacion"})
@@ -381,9 +399,6 @@ def procesar_incremental(df_nuevo):
     # Convertir cada columna individualmente — evita "Must specify axis"
     df_nuevo = _df_safe_str(df_nuevo)
     df_nuevo["identificacion"] = df_nuevo["identificacion"].str.strip()
-
-    # Quitar columnas sin nombre
-    df_nuevo = df_nuevo[[c for c in df_nuevo.columns if c and not c.startswith("unnamed")]]
     df_nuevo = df_nuevo.fillna("")
 
     if base_actual.empty:
@@ -393,9 +408,20 @@ def procesar_incremental(df_nuevo):
         _invalidar_base()
         return len(df_nuevo), 0
 
-    # Normalizar base_actual
-    base_actual.columns = base_actual.columns.str.strip().str.lower()
+    # Normalizar base_actual igual que df_nuevo
+    base_actual.columns = (base_actual.columns
+                           .str.strip()
+                           .str.lower()
+                           .str.replace(r"\s+", "_", regex=True))
+    base_actual = base_actual.loc[:, ~base_actual.columns.duplicated()]
     base_actual = _df_safe_str(base_actual)
+    if "identificacion" not in base_actual.columns:
+        col_id_b = next((a for a in ALIAS_ID if a in base_actual.columns), None)
+        if col_id_b:
+            base_actual = base_actual.rename(columns={col_id_b: "identificacion"})
+        else:
+            st.error("La BASE guardada no tiene columna de identificación.")
+            return 0, 0
     base_actual["identificacion"] = base_actual["identificacion"].str.strip()
     base_actual = base_actual.fillna("")
 
@@ -406,18 +432,28 @@ def procesar_incremental(df_nuevo):
     for col in COLS_CRM:
         nuevos[col] = "0" if col == "intentos" else ""
 
-    # Existentes: actualizar TODAS las columnas operativas (incluyendo categoria, estado, dias, fecha)
-    cols_operativas = [c for c in df_nuevo.columns if c not in COLS_CRM and c != "identificacion"]
+    # Existentes: actualizar TODAS las columnas operativas
+    # (categoria, estado, dias_desde_ult_srv., fecha_ultimo_cargue, etc.)
+    cols_operativas = [c for c in df_nuevo.columns
+                       if c not in COLS_CRM and c != "identificacion"]
     existentes_mask = df_nuevo["identificacion"].isin(ids_viejos)
-    existentes_datos = df_nuevo[existentes_mask][["identificacion"] + cols_operativas].set_index("identificacion")
+
+    # Garantizar que existentes_datos sea siempre un DataFrame con columnas únicas
+    cols_sel = ["identificacion"] + cols_operativas
+    existentes_datos = (df_nuevo[existentes_mask][cols_sel]
+                        .loc[:, ~pd.Index(cols_sel).duplicated()]
+                        .set_index("identificacion"))
 
     base_idx = base_actual.set_index("identificacion")
     for col in cols_operativas:
-        if col in existentes_datos.columns and col in base_idx.columns:
-            base_idx.update(existentes_datos[[col]])
-        elif col in existentes_datos.columns:
+        if col not in existentes_datos.columns:
+            continue
+        col_data = existentes_datos[[col]]   # siempre Series envuelta en DataFrame
+        if col in base_idx.columns:
+            base_idx.update(col_data)
+        else:
             # Columna nueva que no existía en la base → agregarla
-            base_idx[col] = existentes_datos[col]
+            base_idx = base_idx.join(col_data, how="left")
 
     base_actualizada = base_idx.reset_index()
     base_final = pd.concat([base_actualizada, nuevos], ignore_index=True)
