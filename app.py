@@ -5,8 +5,15 @@ import gspread
 from google.oauth2.service_account import Credentials
 import plotly.express as px
 import time
+from zoneinfo import ZoneInfo
 
 st.set_page_config(layout="wide", page_title="🚚 Gestión Aliados Programación", page_icon="🚚")
+
+TZ_COL = ZoneInfo("America/Bogota")
+
+def now_col():
+    """Hora actual en Colombia."""
+    return datetime.now(TZ_COL).replace(tzinfo=None)
 
 # ================= CONSTANTES =================
 ANALISTAS = {
@@ -142,7 +149,7 @@ def reemplazar_hoja(nombre_hoja, df: pd.DataFrame):
     except Exception as e:
         st.error(f"Error reemplazando {nombre_hoja}: {e}")
 
-# ================= CACHÉ BASE (pesada, cambia poco) =================
+# ================= CACHÉ BASE =================
 def _get_base():
     if "base_df" not in st.session_state or st.session_state.get("base_stale", True):
         df = leer_hoja("BASE")
@@ -172,7 +179,7 @@ def _get_base():
                 _serie = df[col_f]
                 if isinstance(_serie, pd.DataFrame): _serie = _serie.iloc[:, 0]
                 df["_fc"] = pd.to_datetime(_serie.astype(str).str.strip(), dayfirst=True, errors="coerce")
-                df["dias"] = (datetime.now()-df["_fc"]).dt.days.fillna(0).astype(int)
+                df["dias"] = (now_col()-df["_fc"]).dt.days.fillna(0).astype(int)
             elif "dias_desde_ult_srv." in df.columns:
                 df["dias"] = pd.to_numeric(df["dias_desde_ult_srv."], errors="coerce").fillna(0).astype(int)
             for col in COLS_CRM:
@@ -186,20 +193,11 @@ def _get_base():
 def _invalidar_base():
     st.session_state["base_stale"] = True
 
-# ================= HISTORIAL: SIEMPRE DESDE SHEETS (TTL 30s) =================
-# Esta es la clave: el historial NO vive en session_state de forma permanente.
-# Se recarga desde Sheets cada 30 segundos O cuando se fuerza.
-# Así todos los computadores ven lo mismo.
-
+# ================= HISTORIAL (TTL 30s) =================
 def _get_hist(force_reload=False):
     ahora  = time.time()
     ultima = st.session_state.get("hist_last_load", 0)
-    necesita_recargar = (
-        force_reload
-        or "hist_df" not in st.session_state
-        or (ahora - ultima) > 30   # recarga cada 30 segundos
-    )
-    if necesita_recargar:
+    if force_reload or "hist_df" not in st.session_state or (ahora - ultima) > 30:
         cols = ["fecha","analista","identificacion","resultado","estado","razon","obs"]
         df   = leer_hoja("HISTORICO", cols)
         if df.empty:
@@ -214,8 +212,6 @@ def _get_hist(force_reload=False):
     return st.session_state["hist_df"]
 
 def _hist_agregar_local(row_dict):
-    """Agrega una fila al historial local SIN recargar Sheets.
-    Así el aliado desaparece del pool inmediatamente."""
     nuevo = pd.DataFrame([{
         "fecha":          pd.to_datetime(row_dict.get("fecha")),
         "analista":       _safe_str(row_dict.get("analista")),
@@ -231,7 +227,6 @@ def _hist_agregar_local(row_dict):
         )
     else:
         st.session_state["hist_df"] = nuevo
-    # Mantener el timestamp para que no se sobreescriba en 30s
     st.session_state["hist_last_load"] = time.time()
 
 # ================= HELPERS =================
@@ -250,7 +245,7 @@ def _prio(dias):
     return "🟢 BAJA"
 
 def calcular_proxima(resultado, estado, razon, intentos):
-    hoy    = datetime.now()
+    hoy    = now_col()
     estado = str(estado or ""); razon = str(razon or "")
     if estado in NO_VOLVER_ESTADOS or razon in NO_VOLVER_RAZONES:
         return "NO_VOLVER"
@@ -271,7 +266,7 @@ def filtrar_pool(df):
         v = str(v).strip()
         if v in ("","nan","None","0"): return True
         f = pd.to_datetime(v, errors="coerce")
-        return pd.isna(f) or f <= datetime.now()
+        return pd.isna(f) or f <= now_col()
     return df[df["proxima_gestion"].apply(disponible)]
 
 # ================= GUARDADO =================
@@ -279,7 +274,7 @@ def guardar_gestion(row):
     fila = [_safe_str(row.get(k,"")) for k in
             ["fecha","analista","identificacion","resultado","estado","razon","obs"]]
     agregar_filas("HISTORICO", [fila])
-    _hist_agregar_local(row)  # actualiza local para efecto inmediato
+    _hist_agregar_local(row)
 
 def actualizar_base_crm(identificacion, resultado, estado, razon):
     try:
@@ -305,7 +300,7 @@ def actualizar_base_crm(identificacion, resultado, estado, razon):
             "ultimo_resultado": _safe_str(resultado),
             "ultimo_estado":    _safe_str(estado),
             "ultima_razon":     _safe_str(razon),
-            "fecha_gestion":    _safe_str(datetime.now()),
+            "fecha_gestion":    _safe_str(now_col()),
             "intentos":         str(intentos_n),
             "proxima_gestion":  _safe_str(proxima),
         }
@@ -338,6 +333,8 @@ def procesar_incremental(df_nuevo):
         return len(df_nuevo), 0
     base_actual["identificacion"] = base_actual["identificacion"].apply(_safe_str)
     base_actual = base_actual.fillna("")
+    # Normalizar columnas de base_actual a minúsculas para que coincidan con df_nuevo
+    base_actual.columns = base_actual.columns.str.strip().str.lower()
     ids_viejos = set(base_actual["identificacion"].unique())
     nuevos = df_nuevo[~df_nuevo["identificacion"].isin(ids_viejos)].copy()
     for col in COLS_CRM: nuevos[col] = "0" if col=="intentos" else ""
@@ -345,6 +342,7 @@ def procesar_incremental(df_nuevo):
     existentes_datos = (df_nuevo[df_nuevo["identificacion"].isin(ids_viejos)]
                         [cols_operativas].set_index("identificacion"))
     base_idx = base_actual.set_index("identificacion")
+    # Actualizar TODAS las columnas operativas incluyendo Categoria, Estado, Dias, Fecha
     for col in cols_operativas:
         if col != "identificacion" and col in existentes_datos.columns:
             base_idx.update(existentes_datos[[col]])
@@ -406,11 +404,12 @@ if perfil == "Coordinador":
     base = _get_base()
     hist = _get_hist()
 
-    tab1,tab2,tab3,tab4,tab5,tab6 = st.tabs([
-        "📊 Hoy","📅 Histórico & KPIs","🔥 Estado CRM",
-        "📤 Cargar Base","🎯 Asignación","⚙️ Reglas",
+    tab1,tab2,tab3,tab4,tab5,tab6,tab7 = st.tabs([
+        "📊 Hoy","📅 Histórico & KPIs","🔍 Buscar Aliado",
+        "🔥 Estado CRM","📤 Cargar Base","🎯 Asignación","⚙️ Reglas",
     ])
 
+    # ─── HOY ───
     with tab1:
         st.subheader("Auditoría de Gestión")
         if st.button("🔄 Actualizar gestiones", key="btn_ref_hoy"):
@@ -422,11 +421,11 @@ if perfil == "Coordinador":
             hv = hist.dropna(subset=["fecha"])
             col_fd, col_bt = st.columns([3,1])
             with col_fd:
-                valor_fecha = (datetime.now().date()
+                valor_fecha = (now_col().date()
                                if st.session_state.pop("_reset_fecha_aud", False)
-                               else datetime.now().date())
+                               else now_col().date())
                 fecha_aud = st.date_input("📅 Fecha a auditar", value=valor_fecha,
-                                          max_value=datetime.now().date(), key="coord_fecha_aud")
+                                          max_value=now_col().date(), key="coord_fecha_aud")
             with col_bt:
                 st.markdown("<br>", unsafe_allow_html=True)
                 if st.button("📅 Hoy"):
@@ -436,7 +435,7 @@ if perfil == "Coordinador":
             if hf.empty:
                 st.warning(f"Sin gestiones el {fecha_aud.strftime('%d/%m/%Y')}.")
             else:
-                label = "hoy" if fecha_aud==datetime.now().date() else fecha_aud.strftime("%d/%m/%Y")
+                label = "hoy" if fecha_aud==now_col().date() else fecha_aud.strftime("%d/%m/%Y")
                 t=len(hf); sc=len(hf[hf["resultado"]=="Sí contestó"])
                 it=len(hf[hf["estado"]=="Interesado llega a cargue"])
                 rc=len(hf[hf["estado"]=="Aliado Rechaza la oferta"])
@@ -464,13 +463,17 @@ if perfil == "Coordinador":
                 with fb: bus=st.text_input("Buscar cédula","",key="bus_c")
                 df_f=hf[hf["analista"].isin(af)&hf["resultado"].isin(rf)]
                 if bus: df_f=df_f[df_f["identificacion"].astype(str).str.contains(bus,na=False)]
-                st.dataframe(df_f[["fecha","analista","identificacion","resultado","estado","razon","obs"]].rename(
-                    columns={"fecha":"Fecha","analista":"Analista","identificacion":"Cédula",
+                # Hora en Colombia
+                df_show = df_f.copy()
+                df_show["Hora"] = df_show["fecha"].dt.strftime("%I:%M %p")
+                st.dataframe(df_show[["Hora","analista","identificacion","resultado","estado","razon","obs"]].rename(
+                    columns={"analista":"Analista","identificacion":"Cédula",
                              "resultado":"Resultado","estado":"Estado","razon":"Razón","obs":"Obs"}
                 ),use_container_width=True,hide_index=True)
                 st.download_button("📥 Descargar día (CSV)",df_f.to_csv(index=False).encode("utf-8"),
                                    f"gestion_{fecha_aud}.csv","text/csv")
 
+    # ─── HISTÓRICO ───
     with tab2:
         st.subheader("Histórico & KPIs")
         if st.button("🔄 Actualizar historial", key="btn_ref_hist"):
@@ -481,10 +484,10 @@ if perfil == "Coordinador":
         else:
             hv2=hist.dropna(subset=["fecha"])
             c1,c2=st.columns(2)
-            with c1: f1=st.date_input("Desde",datetime.now().date()-timedelta(days=7),
-                                       max_value=datetime.now().date(),key="h_f1")
-            with c2: f2=st.date_input("Hasta",datetime.now().date(),
-                                       max_value=datetime.now().date(),key="h_f2")
+            with c1: f1=st.date_input("Desde",now_col().date()-timedelta(days=7),
+                                       max_value=now_col().date(),key="h_f1")
+            with c2: f2=st.date_input("Hasta",now_col().date(),
+                                       max_value=now_col().date(),key="h_f2")
             d=hv2[(hv2["fecha"].dt.date>=f1)&(hv2["fecha"].dt.date<=f2)]
             if d.empty:
                 st.warning("Sin registros en ese rango.")
@@ -536,11 +539,71 @@ if perfil == "Coordinador":
                 tend.columns=["fecha","llamadas"]
                 st.plotly_chart(px.line(tend,x="fecha",y="llamadas",title="Tendencia diaria",markers=True),
                                 use_container_width=True)
-                st.dataframe(d.sort_values("fecha",ascending=False),use_container_width=True)
-                st.download_button("📥 Descargar (CSV)",d.to_csv(index=False).encode("utf-8"),
+                # Detalle con vehiculo y ciudad
+                d_show = d.copy()
+                d_show["Hora"] = d_show["fecha"].dt.strftime("%I:%M %p")
+                # Enriquecer con datos de base si está disponible
+                if base is not None:
+                    cols_extra = [c for c in ["identificacion","vehiculo","municipio","zona"]
+                                  if c in base.columns]
+                    base_mini = base[cols_extra].copy()
+                    base_mini["identificacion"] = base_mini["identificacion"].astype(str)
+                    d_show["identificacion"] = d_show["identificacion"].astype(str)
+                    d_show = d_show.merge(base_mini, on="identificacion", how="left")
+                cols_hist = ["Hora","analista","identificacion","resultado","estado","razon"]
+                for extra in ["vehiculo","municipio","zona"]:
+                    if extra in d_show.columns: cols_hist.append(extra)
+                cols_hist.append("obs")
+                st.dataframe(d_show[cols_hist].rename(
+                    columns={"analista":"Analista","identificacion":"Cédula",
+                             "resultado":"Resultado","estado":"Estado","razon":"Razón",
+                             "vehiculo":"Vehículo","municipio":"Ciudad","zona":"Zona","obs":"Obs"}
+                ),use_container_width=True,hide_index=True)
+                st.download_button("📥 Descargar (CSV)",d_show.to_csv(index=False).encode("utf-8"),
                                    f"historico_{f1}_{f2}.csv","text/csv")
 
+    # ─── BUSCAR ALIADO (nuevo) ───
     with tab3:
+        st.subheader("🔍 Buscar Aliado por Cédula")
+        cedula_buscar = st.text_input("Ingresa la cédula del aliado", "", key="busq_cedula")
+        if cedula_buscar and base is not None:
+            resultado_b = base[base["identificacion"].astype(str)==cedula_buscar.strip()]
+            if resultado_b.empty:
+                st.warning(f"No se encontró ningún aliado con cédula **{cedula_buscar}**.")
+            else:
+                fila_b = resultado_b.iloc[0]
+                st.success(f"✅ Aliado encontrado")
+                # Datos del aliado
+                cols_info = [c for c in ["identificacion","mensajero","celular","correo",
+                                          "zona","municipio","vehiculo","categoria",
+                                          "dias","intentos","ultimo_resultado",
+                                          "ultimo_estado","proxima_gestion"] if c in fila_b.index]
+                c1,c2 = st.columns(2)
+                mitad = len(cols_info)//2
+                with c1:
+                    for col in cols_info[:mitad]:
+                        st.metric(col.replace("_"," ").title(), str(fila_b[col]))
+                with c2:
+                    for col in cols_info[mitad:]:
+                        st.metric(col.replace("_"," ").title(), str(fila_b[col]))
+
+                # Historial de gestiones de ese aliado
+                st.markdown("---")
+                st.markdown("#### 📋 Historial de gestiones")
+                hist_aliado = hist[hist["identificacion"].astype(str)==cedula_buscar.strip()].copy()
+                if hist_aliado.empty:
+                    st.info("Sin gestiones registradas para este aliado.")
+                else:
+                    hist_aliado["Hora"] = hist_aliado["fecha"].dt.strftime("%d/%m/%Y %I:%M %p")
+                    st.dataframe(hist_aliado[["Hora","analista","resultado","estado","razon","obs"]].rename(
+                        columns={"analista":"Analista","resultado":"Resultado",
+                                 "estado":"Estado","razon":"Razón","obs":"Obs"}
+                    ),use_container_width=True,hide_index=True)
+        elif cedula_buscar and base is None:
+            st.warning("Carga la base primero.")
+
+    # ─── ESTADO CRM ───
+    with tab4:
         if base is None:
             st.warning("Carga la base primero.")
         else:
@@ -550,7 +613,7 @@ if perfil == "Coordinador":
                 v=str(v).strip()
                 if v in ("","nan","None","NO_VOLVER","0"): return False
                 f=pd.to_datetime(v,errors="coerce")
-                return not pd.isna(f) and f>datetime.now()
+                return not pd.isna(f) and f>now_col()
             paus=base[base["proxima_gestion"].apply(en_pausa_fn)]
             c1,c2,c3,c4=st.columns(4)
             c1.metric("📦 Total",len(base)); c2.metric("✅ Disponibles",len(disp))
@@ -573,7 +636,8 @@ if perfil == "Coordinador":
                      if c in nv.columns]
                 st.dataframe(nv[cnv],use_container_width=True)
 
-    with tab4:
+    # ─── CARGAR BASE ───
+    with tab5:
         st.subheader("📤 Carga de Base")
         st.info("La base permanece en Google Sheets indefinidamente. Usa Incremental para conservar el historial CRM.")
         modo=st.radio("Modo de carga",[
@@ -604,7 +668,8 @@ if perfil == "Coordinador":
         if base is not None:
             st.info(f"Base activa en Google Sheets: **{len(base):,} aliados**")
 
-    with tab5:
+    # ─── ASIGNACIÓN ───
+    with tab6:
         if base is None:
             st.warning("Carga la base primero.")
         else:
@@ -627,15 +692,15 @@ if perfil == "Coordinador":
                 dc=[{"analista":"TODOS","modo":"Analista decide","zona":"","vehiculo":""}]
             if st.button("💾 Guardar asignación"):
                 reemplazar_hoja("CONFIG",pd.DataFrame(dc))
-                st.session_state["config_df"] = pd.DataFrame(dc)  # actualizar caché
+                st.session_state["config_df"] = pd.DataFrame(dc)
                 st.success("Guardado.")
-            # Usar caché de config en lugar de leer Sheets de nuevo
             cf = st.session_state.get("config_df", pd.DataFrame())
             if not cf.empty:
                 st.markdown("---"); st.markdown("##### Configuración activa:")
                 st.dataframe(cf,use_container_width=True)
 
-    with tab6:
+    # ─── REGLAS ───
+    with tab7:
         st.subheader("⚙️ Reglas de recontacto automático")
         st.markdown("""
 | Resultado / Estado | Acción | Días espera |
@@ -664,8 +729,8 @@ if perfil == "Analista":
         st.warning("⚠️ La coordinadora aún no ha cargado la base. Espera un momento.")
         st.stop()
 
-    tab_g, tab_h, tab_his = st.tabs([
-        "📞 Gestión del Día","📊 Mi Resumen de Hoy","📅 Mi Histórico",
+    tab_g, tab_h, tab_his, tab_bus = st.tabs([
+        "📞 Gestión del Día","📊 Mi Resumen de Hoy","📅 Mi Histórico","🔍 Buscar Aliado",
     ])
 
     with tab_g:
@@ -691,12 +756,11 @@ if perfil == "Analista":
         pool["_o"]=pool["PRIORIDAD"].map(op).fillna(3)
         pool=pool.sort_values("_o").drop(columns=["_o"]).reset_index(drop=True)
 
-        # Quitar gestionados hoy — desde hist (incluye local + Sheets)
         if not hist.empty:
             hv=hist.copy()
             hv["fecha"]=pd.to_datetime(hv["fecha"],errors="coerce")
             hv=hv.dropna(subset=["fecha"])
-            gh=hv[hv["fecha"].dt.date==datetime.now().date()]["identificacion"].astype(str).tolist()
+            gh=hv[hv["fecha"].dt.date==now_col().date()]["identificacion"].astype(str).tolist()
             pool=pool[~pool["identificacion"].astype(str).isin(gh)]
 
         c1,c2=st.columns(2)
@@ -711,7 +775,7 @@ if perfil == "Analista":
         st.caption(f"Disponibles en este filtro: **{len(pool)}**")
 
         if st.button("🚀 Generar mis llamadas"):
-            hoy_s=datetime.now().date().isoformat()
+            hoy_s=now_col().date().isoformat()
             rep=cargar_reparto()
             if not rep.empty and "fecha" in rep.columns:
                 if len(rep)>0 and str(rep["fecha"].iloc[0])!=hoy_s:
@@ -731,7 +795,7 @@ if perfil == "Analista":
                 st.success(f"✅ {len(bloque)} aliados asignados.")
                 st.rerun()
 
-        hoy_s=datetime.now().date().isoformat()
+        hoy_s=now_col().date().isoformat()
         rep_act=cargar_reparto()
         mis_ids=[]
         if not rep_act.empty and "fecha" in rep_act.columns and "analista" in rep_act.columns:
@@ -741,7 +805,7 @@ if perfil == "Analista":
             hv2=hist.copy()
             hv2["fecha"]=pd.to_datetime(hv2["fecha"],errors="coerce")
             hv2=hv2.dropna(subset=["fecha"])
-            gh2=hv2[hv2["fecha"].dt.date==datetime.now().date()]["identificacion"].astype(str).tolist()
+            gh2=hv2[hv2["fecha"].dt.date==now_col().date()]["identificacion"].astype(str).tolist()
             mis_ids=[i for i in mis_ids if i not in gh2]
 
         if mis_ids:
@@ -779,7 +843,7 @@ if perfil == "Analista":
                 if res=="Sí contestó" and er is None:
                     st.error("Selecciona un Estado final.")
                 else:
-                    guardar_gestion({"fecha":datetime.now(),"analista":nombre,
+                    guardar_gestion({"fecha":now_col(),"analista":nombre,
                                      "identificacion":ali,"resultado":res,
                                      "estado":er,"razon":rr,"obs":obs})
                     with st.spinner("Actualizando CRM..."):
@@ -791,8 +855,7 @@ if perfil == "Analista":
             st.info("✅ Sin aliados pendientes. Genera un nuevo bloque arriba.")
 
     with tab_h:
-        st.subheader(f"Tus gestiones de hoy — {datetime.now().strftime('%d/%m/%Y')}")
-        # Siempre usar hist (ya tiene lo de esta sesión + lo de Sheets)
+        st.subheader(f"Tus gestiones de hoy — {now_col().strftime('%d/%m/%Y')}")
         if hist.empty:
             st.info("Sin gestiones hoy.")
         else:
@@ -800,7 +863,7 @@ if perfil == "Analista":
             hv3["fecha"]=pd.to_datetime(hv3["fecha"],errors="coerce")
             hv3=hv3.dropna(subset=["fecha"])
             mh=hv3[(hv3["analista"]==nombre)&
-                   (hv3["fecha"].dt.date==datetime.now().date())].copy()
+                   (hv3["fecha"].dt.date==now_col().date())].copy()
             if mh.empty:
                 st.info("Sin gestiones hoy. ¡Empieza en Gestión del Día!")
             else:
@@ -818,7 +881,7 @@ if perfil == "Analista":
                              "estado":"Estado","razon":"Razón","obs":"Obs"}
                 ),use_container_width=True,hide_index=True)
                 st.download_button("📥 Descargar",mh.to_csv(index=False).encode("utf-8"),
-                                   f"hoy_{datetime.now().date()}.csv","text/csv")
+                                   f"hoy_{now_col().date()}.csv","text/csv")
                 if t>=3:
                     rr=mh.groupby("resultado").size().reset_index(name="n")
                     st.plotly_chart(px.pie(rr,values="n",names="resultado",
@@ -837,10 +900,10 @@ if perfil == "Analista":
                 st.info("Sin gestiones registradas aún.")
             else:
                 c1,c2=st.columns(2)
-                with c1: fd=st.date_input("Desde",datetime.now().date()-timedelta(days=7),
-                                           max_value=datetime.now().date(),key="mh_d")
-                with c2: fh=st.date_input("Hasta",datetime.now().date(),
-                                           max_value=datetime.now().date(),key="mh_h")
+                with c1: fd=st.date_input("Desde",now_col().date()-timedelta(days=7),
+                                           max_value=now_col().date(),key="mh_d")
+                with c2: fh=st.date_input("Hasta",now_col().date(),
+                                           max_value=now_col().date(),key="mh_h")
                 mf=mhist[(mhist["fecha"].dt.date>=fd)&(mhist["fecha"].dt.date<=fh)].copy()
                 if mf.empty:
                     st.warning("Sin gestiones en ese rango.")
@@ -862,13 +925,64 @@ if perfil == "Analista":
                     st.markdown("---")
                     for dia in sorted(mf["fecha"].dt.date.unique(),reverse=True):
                         rd=mf[mf["fecha"].dt.date==dia].copy()
-                        lbl="🟢 Hoy" if dia==datetime.now().date() else dia.strftime("%A %d/%m/%Y").capitalize()
+                        lbl="🟢 Hoy" if dia==now_col().date() else dia.strftime("%A %d/%m/%Y").capitalize()
                         with st.expander(f"{lbl} — {len(rd)} gestiones"):
                             rd["Hora"]=rd["fecha"].dt.strftime("%I:%M %p")
-                            st.dataframe(rd[["Hora","identificacion","resultado","estado","razon","obs"]].rename(
+                            # Enriquecer con vehiculo y ciudad
+                            if base is not None:
+                                cols_extra=[c for c in ["identificacion","vehiculo","municipio"]
+                                            if c in base.columns]
+                                base_mini=base[cols_extra].copy()
+                                base_mini["identificacion"]=base_mini["identificacion"].astype(str)
+                                rd["identificacion"]=rd["identificacion"].astype(str)
+                                rd=rd.merge(base_mini,on="identificacion",how="left")
+                            cols_rd=["Hora","identificacion","resultado","estado","razon"]
+                            for extra in ["vehiculo","municipio"]:
+                                if extra in rd.columns: cols_rd.append(extra)
+                            cols_rd.append("obs")
+                            st.dataframe(rd[cols_rd].rename(
                                 columns={"identificacion":"Cédula","resultado":"Resultado",
-                                         "estado":"Estado","razon":"Razón","obs":"Obs"}
+                                         "estado":"Estado","razon":"Razón",
+                                         "vehiculo":"Vehículo","municipio":"Ciudad","obs":"Obs"}
                             ),use_container_width=True,hide_index=True)
                     st.download_button("📥 Descargar historial",
                                        mf.to_csv(index=False).encode("utf-8"),
                                        f"historial_{fd}_{fh}.csv","text/csv")
+
+    with tab_bus:
+        st.subheader("🔍 Buscar Aliado por Cédula")
+        st.caption("Consulta los datos y el historial de cualquier aliado.")
+        cedula_bus = st.text_input("Ingresa la cédula", "", key="ana_busq_cedula")
+        if cedula_bus.strip() and base is not None:
+            res_b = base[base["identificacion"].astype(str) == cedula_bus.strip()]
+            if res_b.empty:
+                st.warning(f"No se encontró ningún aliado con cédula **{cedula_bus}**.")
+            else:
+                fila_b = res_b.iloc[0]
+                st.success("✅ Aliado encontrado")
+                cols_info = [c for c in ["identificacion","mensajero","celular",
+                                          "zona","municipio","vehiculo","categoria",
+                                          "dias","intentos","ultimo_resultado",
+                                          "ultimo_estado","proxima_gestion"]
+                             if c in fila_b.index]
+                c1, c2 = st.columns(2)
+                mitad = len(cols_info) // 2
+                with c1:
+                    for col in cols_info[:mitad]:
+                        st.metric(col.replace("_"," ").title(), str(fila_b[col]))
+                with c2:
+                    for col in cols_info[mitad:]:
+                        st.metric(col.replace("_"," ").title(), str(fila_b[col]))
+                st.markdown("---")
+                st.markdown("#### 📋 Historial de gestiones")
+                hist_ali = hist[hist["identificacion"].astype(str) == cedula_bus.strip()].copy()
+                if hist_ali.empty:
+                    st.info("Sin gestiones registradas para este aliado.")
+                else:
+                    hist_ali["Hora"] = hist_ali["fecha"].dt.strftime("%d/%m/%Y %I:%M %p")
+                    st.dataframe(hist_ali[["Hora","analista","resultado","estado","razon","obs"]].rename(
+                        columns={"analista":"Analista","resultado":"Resultado",
+                                 "estado":"Estado","razon":"Razón","obs":"Obs"}
+                    ), use_container_width=True, hide_index=True)
+        elif cedula_bus.strip() and base is None:
+            st.warning("Base no disponible.")
