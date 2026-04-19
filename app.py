@@ -348,7 +348,8 @@ def procesar_incremental(df_nuevo):
             base_idx.update(existentes_datos[[col]])
     base_actualizada = base_idx.reset_index()
     base_final = pd.concat([base_actualizada, nuevos], ignore_index=True)
-    base_final = base_final.fillna("").loc[:, ~pd.DataFrame(base_final).columns.duplicated()]
+    base_final = base_final.fillna("")
+    base_final = base_final.loc[:, ~base_final.columns.duplicated()]
     reemplazar_hoja("BASE", base_final); _invalidar_base()
     return len(nuevos), len(existentes_datos)
 
