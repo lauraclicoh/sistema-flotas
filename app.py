@@ -648,8 +648,16 @@ if perfil == "Coordinador":
         archivo=st.file_uploader("Excel (.xlsx)",type=["xlsx"])
         if archivo:
             try:
-                df_s=pd.read_excel(archivo,engine="openpyxl",dtype=str)
-                df_s=df_s.fillna("")
+                df_s=pd.read_excel(archivo,engine="openpyxl")
+                # Convertir todo a string de forma segura (compatible con todas versiones pandas)
+                def _to_str(x):
+                    if x is None: return ""
+                    try:
+                        if pd.isna(x): return ""
+                    except: pass
+                    if isinstance(x, float) and x == int(x): return str(int(x))
+                    return str(x)
+                df_s = df_s.apply(lambda col: col.map(_to_str))
                 st.success(f"{len(df_s):,} registros leídos")
                 st.dataframe(df_s.head(5),use_container_width=True)
                 if "Incremental" in modo:
