@@ -163,24 +163,19 @@ def _prio(dias):
     if dias > 1: return "🟡 MEDIA"
     return "🟢 BAJA"
 
-# FIX BUG 2 — parseo robusto de fecha_ultimo_cargue
-# Soporta: "20260418" (YYYYMMDD), "2026-04-18", "18/04/2026", "Sin fecha", ""
 def _parse_fecha_cargue(serie: pd.Series) -> pd.Series:
-    """Convierte una Serie con fechas en múltiples formatos a datetime."""
     resultados = []
     for raw in serie:
         val = str(raw).strip()
         if not val or val.lower() in ("sin fecha", "nan", "none", ""):
             resultados.append(pd.NaT)
             continue
-        # Formato compacto YYYYMMDD (ej: 20260418)
         if val.isdigit() and len(val) == 8:
             try:
                 resultados.append(datetime.strptime(val, "%Y%m%d"))
                 continue
             except ValueError:
                 pass
-        # Intentar con pandas (maneja ISO, dd/mm/yyyy, etc.)
         parsed = pd.to_datetime(val, dayfirst=True, errors="coerce")
         resultados.append(parsed)
     return pd.Series(resultados, index=serie.index)
@@ -266,18 +261,37 @@ def _hist_agregar_local(row_dict):
     st.session_state["hist_last_load"] = time.time()
 
 # ================= LÓGICA CRM =================
+# Reglas de recontacto:
+# - No contestó / Apagado / Fuera de servicio / Número errado → 5 días
+# - Si intentos >= 10 (pausa larga activa): próximos 5 intentos con misma causal → NO_VOLVER (total >= 15)
+# - 10-14 intentos sin contacto → pausa 30 días
+# - 15+ intentos sin contacto → bloqueo permanente
+# - Estados/razones de bloqueo permanente → NO_VOLVER
 def calcular_proxima(resultado, estado, razon, intentos):
     hoy    = now_col()
-    estado = str(estado or ""); razon = str(razon or "")
+    estado = str(estado or "")
+    razon  = str(razon or "")
+
+    # Bloqueo por estado o razón
     if estado in NO_VOLVER_ESTADOS or razon in NO_VOLVER_RAZONES:
         return "NO_VOLVER"
-    if resultado in ["No contestó","Apagado","Fuera de servicio","Número errado"]:
-        if intentos >= 10: return hoy + timedelta(days=30)
-        if resultado == "No contestó": return hoy + timedelta(days=1)
-        if resultado in ["Apagado","Fuera de servicio"]: return hoy + timedelta(days=2)
-        if resultado == "Número errado": return hoy + timedelta(days=3)
+
+    # No-respuesta: escalado por intentos
+    if resultado in NO_RESPONDEN:
+        if intentos >= 15:
+            # 15+ intentos (5 más después de la pausa de 30 días) → bloqueo permanente
+            return "NO_VOLVER"
+        if intentos >= 10:
+            # 10-14 intentos → pausa larga de 30 días
+            return hoy + timedelta(days=30)
+        # Menos de 10 intentos → recontacto en 5 días
+        return hoy + timedelta(days=5)
+
+    # Interesado o Fleet → pausa 5 días
     if estado in ["Interesado llega a cargue","Aliado Fleet/Delivery no acepta hub"]:
         return hoy + timedelta(days=5)
+
+    # Resto → 3 días
     return hoy + timedelta(days=3)
 
 def filtrar_pool(df):
@@ -338,9 +352,7 @@ def actualizar_base_crm(identificacion, resultado, estado, razon):
     except Exception as e:
         st.warning(f"CRM no actualizado en BASE: {e}")
 
-# FIX BUG 2 — conversión segura celda a celda, sin .apply() sobre DataFrame
 def _celda_a_str(x):
-    """Convierte un valor individual a string limpio para subir a Sheets."""
     if x is None: return ""
     try:
         if pd.isna(x): return ""
@@ -357,7 +369,6 @@ def _celda_a_str(x):
     return str(x)
 
 def _df_safe_str(df: pd.DataFrame) -> pd.DataFrame:
-    """Convierte cada columna de un DataFrame a string de forma segura."""
     out = pd.DataFrame(index=df.index)
     for col in df.columns:
         out[col] = df[col].map(_celda_a_str)
@@ -366,24 +377,15 @@ def _df_safe_str(df: pd.DataFrame) -> pd.DataFrame:
 def procesar_incremental(df_nuevo):
     base_actual = leer_hoja("BASE")
 
-    # --- Normalizar df_nuevo ---
     df_nuevo = df_nuevo.copy()
-
-    # Normalizar nombres de columnas: minúsculas, sin espacios extremos,
-    # espacios internos → guión bajo (ej: "id aliado" → "id_aliado")
     df_nuevo.columns = (df_nuevo.columns
                         .str.strip()
                         .str.lower()
                         .str.replace(r"\s+", "_", regex=True))
-
-    # Quitar columnas sin nombre ANTES de cualquier otra operación
     df_nuevo = df_nuevo[[c for c in df_nuevo.columns
                           if c and not c.startswith("unnamed") and c != "_"]]
-
-    # Deduplicar columnas conservando la primera ocurrencia
     df_nuevo = df_nuevo.loc[:, ~df_nuevo.columns.duplicated()]
 
-    # Buscar columna de identificación con todos los alias posibles
     ALIAS_ID = ["identificacion", "id_aliado", "id aliado", "id", "cedula",
                 "documento", "nro_identificacion", "numero_identificacion"]
     col_id = next((a for a in ALIAS_ID if a in df_nuevo.columns), None)
@@ -395,8 +397,6 @@ def procesar_incremental(df_nuevo):
         return 0, 0
 
     df_nuevo = df_nuevo.rename(columns={col_id: "identificacion"})
-
-    # Convertir cada columna individualmente — evita "Must specify axis"
     df_nuevo = _df_safe_str(df_nuevo)
     df_nuevo["identificacion"] = df_nuevo["identificacion"].str.strip()
     df_nuevo = df_nuevo.fillna("")
@@ -408,7 +408,6 @@ def procesar_incremental(df_nuevo):
         _invalidar_base()
         return len(df_nuevo), 0
 
-    # Normalizar base_actual igual que df_nuevo
     base_actual.columns = (base_actual.columns
                            .str.strip()
                            .str.lower()
@@ -427,18 +426,14 @@ def procesar_incremental(df_nuevo):
 
     ids_viejos = set(base_actual["identificacion"].unique())
 
-    # Nuevos registros
     nuevos = df_nuevo[~df_nuevo["identificacion"].isin(ids_viejos)].copy()
     for col in COLS_CRM:
         nuevos[col] = "0" if col == "intentos" else ""
 
-    # Existentes: actualizar TODAS las columnas operativas
-    # (categoria, estado, dias_desde_ult_srv., fecha_ultimo_cargue, etc.)
     cols_operativas = [c for c in df_nuevo.columns
                        if c not in COLS_CRM and c != "identificacion"]
     existentes_mask = df_nuevo["identificacion"].isin(ids_viejos)
 
-    # Garantizar que existentes_datos sea siempre un DataFrame con columnas únicas
     cols_sel = ["identificacion"] + cols_operativas
     existentes_datos = (df_nuevo[existentes_mask][cols_sel]
                         .loc[:, ~pd.Index(cols_sel).duplicated()]
@@ -448,11 +443,10 @@ def procesar_incremental(df_nuevo):
     for col in cols_operativas:
         if col not in existentes_datos.columns:
             continue
-        col_data = existentes_datos[[col]]   # siempre Series envuelta en DataFrame
+        col_data = existentes_datos[[col]]
         if col in base_idx.columns:
             base_idx.update(col_data)
         else:
-            # Columna nueva que no existía en la base → agregarla
             base_idx = base_idx.join(col_data, how="left")
 
     base_actualizada = base_idx.reset_index()
@@ -517,9 +511,9 @@ if perfil == "Coordinador":
     base = _get_base()
     hist = _get_hist()
 
-    tab1,tab2,tab3,tab4,tab5,tab6,tab7 = st.tabs([
+    tab1,tab2,tab3,tab4,tab5,tab6,tab7,tab8 = st.tabs([
         "📊 Hoy","📅 Histórico & KPIs","🔍 Buscar Aliado",
-        "🔥 Estado CRM","📤 Cargar Base","🎯 Asignación","⚙️ Reglas",
+        "🔥 Estado CRM","📤 Cargar Base","🎯 Asignación","⚙️ Reglas","🗺️ Cobertura por Zona",
     ])
 
     # ─── HOY ───
@@ -753,11 +747,8 @@ if perfil == "Coordinador":
         archivo=st.file_uploader("Excel (.xlsx)",type=["xlsx"])
         if archivo:
             try:
-                # Leer sin forzar dtype para preservar tipos originales
                 df_s = pd.read_excel(archivo, engine="openpyxl")
-                # Quitar columnas sin nombre
                 df_s = df_s[[c for c in df_s.columns if not str(c).startswith("Unnamed")]]
-                # Convertir a string columna por columna (evita el error "Must specify axis")
                 df_s = _df_safe_str(df_s)
                 df_s = df_s.fillna("")
                 st.success(f"{len(df_s):,} registros leídos")
@@ -817,10 +808,11 @@ if perfil == "Coordinador":
         st.markdown("""
 | Resultado / Estado | Acción | Días espera |
 |---|---|---|
-| No contestó | Recontacto | **1 día** |
-| Apagado / Fuera de servicio | Recontacto | **2 días** |
-| Número errado | Recontacto | **3 días** |
-| 10+ intentos sin contacto | Pausa larga | **30 días** |
+| No contestó | Recontacto | **5 días** |
+| Apagado / Fuera de servicio | Recontacto | **5 días** |
+| Número errado | Recontacto | **5 días** |
+| 10 - 14 intentos sin contacto | Pausa larga | **30 días** |
+| 15+ intentos sin contacto (5 más después de pausa) | ❌ Bloqueo permanente | Nunca |
 | Interesado llega a cargue | Pausa | **5 días** |
 | Fleet no acepta HUB | Pausa | **5 días** |
 | Interesado esporádico | Recontacto | **3 días** |
@@ -828,7 +820,118 @@ if perfil == "Coordinador":
 | Empleado / Point | ❌ Bloqueo permanente | Nunca |
 | No le interesa | ❌ Bloqueo permanente | Nunca |
         """)
-        st.info("Estas reglas se aplican automáticamente. Los aliados en pausa vuelven solos cuando se cumple el tiempo.")
+        st.info("Reglas automáticas: los aliados en pausa vuelven solos al cumplirse el tiempo. Tras 10 intentos fallidos entran en pausa de 30 días; si acumulan 5 intentos más (total 15) pasan a bloqueo permanente.")
+
+    # ─── COBERTURA POR ZONA ───
+    with tab8:
+        st.subheader("🗺️ Cobertura de Gestión por Zona")
+        if base is None:
+            st.warning("Carga la base primero.")
+        elif hist.empty:
+            st.warning("Aún no hay gestiones registradas.")
+        else:
+            col_f1, col_f2, col_f3 = st.columns(3)
+            with col_f1:
+                fz1 = st.date_input("Desde", now_col().date()-timedelta(days=7),
+                                    max_value=now_col().date(), key="cob_f1")
+            with col_f2:
+                fz2 = st.date_input("Hasta", now_col().date(),
+                                    max_value=now_col().date(), key="cob_f2")
+            with col_f3:
+                vhs_cob = ["Todos"] + sorted(base["vehiculo_norm"].dropna().unique().tolist())
+                vh_filtro = st.selectbox("Vehículo", vhs_cob, key="cob_vh")
+
+            # IDs gestionados en el rango de fechas
+            hv_cob = hist.dropna(subset=["fecha"])
+            hv_cob = hv_cob[(hv_cob["fecha"].dt.date >= fz1) & (hv_cob["fecha"].dt.date <= fz2)]
+            gestionados_ids = set(hv_cob["identificacion"].astype(str).unique())
+
+            # Filtrar base por vehículo si aplica
+            base_cob = base.copy()
+            if vh_filtro != "Todos":
+                base_cob = base_cob[base_cob["vehiculo_norm"] == vh_filtro]
+
+            # Construir resumen por zona
+            resumen = []
+            for zona in sorted(base_cob["zona"].dropna().unique()):
+                aliados_zona  = base_cob[base_cob["zona"] == zona]
+                total         = len(aliados_zona)
+                gestionados   = len(aliados_zona[
+                    aliados_zona["identificacion"].astype(str).isin(gestionados_ids)
+                ])
+                pendientes    = total - gestionados
+                pct           = round(gestionados / total * 100, 1) if total > 0 else 0
+                resumen.append({
+                    "Zona": zona,
+                    "Total aliados": total,
+                    "Gestionados": gestionados,
+                    "Pendientes": pendientes,
+                    "% Cobertura": pct,
+                })
+
+            df_res = pd.DataFrame(resumen).sort_values("% Cobertura", ascending=False)
+
+            # Métricas globales
+            tot_g  = df_res["Total aliados"].sum()
+            gest_g = df_res["Gestionados"].sum()
+            pend_g = df_res["Pendientes"].sum()
+            pct_g  = round(gest_g / tot_g * 100, 1) if tot_g > 0 else 0
+
+            c1,c2,c3,c4 = st.columns(4)
+            c1.metric("📦 Total aliados",   f"{tot_g:,}")
+            c2.metric("✅ Gestionados",      f"{gest_g:,}")
+            c3.metric("⏳ Pendientes",       f"{pend_g:,}")
+            c4.metric("📊 Cobertura global", f"{pct_g}%")
+
+            st.markdown("---")
+            st.markdown("#### Detalle por zona")
+
+            # Tabla con barra de progreso visual
+            df_display = df_res.copy()
+            df_display["Cobertura"] = df_display["% Cobertura"].apply(lambda x: f"{x}%")
+            st.dataframe(
+                df_display[["Zona","Total aliados","Gestionados","Pendientes","Cobertura"]],
+                use_container_width=True,
+                hide_index=True,
+            )
+
+            st.markdown("---")
+
+            # Gráfico apilado: gestionados vs pendientes
+            fig_cob = px.bar(
+                df_res,
+                x="Zona",
+                y=["Gestionados","Pendientes"],
+                barmode="stack",
+                title=f"Cobertura por Zona · {fz1.strftime('%d/%m')} al {fz2.strftime('%d/%m/%Y')}",
+                color_discrete_map={"Gestionados":"#28a745","Pendientes":"#dc3545"},
+                labels={"value":"Aliados","variable":"Estado"},
+            )
+            fig_cob.update_layout(xaxis_tickangle=-45, legend_title_text="")
+            st.plotly_chart(fig_cob, use_container_width=True)
+
+            # Gráfico de % cobertura por zona
+            fig_pct = px.bar(
+                df_res.sort_values("% Cobertura"),
+                x="% Cobertura",
+                y="Zona",
+                orientation="h",
+                title="% Cobertura por Zona",
+                color="% Cobertura",
+                color_continuous_scale=["#dc3545","#ffc107","#28a745"],
+                range_color=[0,100],
+                labels={"% Cobertura":"% Cobertura"},
+            )
+            fig_pct.update_layout(coloraxis_showscale=False, yaxis_title="")
+            st.plotly_chart(fig_pct, use_container_width=True)
+
+            st.download_button(
+                "📥 Descargar reporte (CSV)",
+                df_res.to_csv(index=False).encode("utf-8"),
+                f"cobertura_{fz1}_{fz2}.csv",
+                "text/csv",
+            )
+
 
 # ================================================================
 # ANALISTA
@@ -869,8 +972,6 @@ if perfil == "Analista":
         pool["_o"]=pool["PRIORIDAD"].map(op).fillna(3)
         pool=pool.sort_values("_o").drop(columns=["_o"]).reset_index(drop=True)
 
-        # Usar historial fresco del session_state para excluir ya gestionados hoy
-        # Incluye gestiones hechas desde tab_bus
         _hist_pool = st.session_state.get("hist_df", pd.DataFrame())
         if not _hist_pool.empty:
             hv = _hist_pool.copy()
@@ -917,8 +1018,6 @@ if perfil == "Analista":
         if not rep_act.empty and "fecha" in rep_act.columns and "analista" in rep_act.columns:
             mis_ids=rep_act[(rep_act["fecha"]==hoy_s)&
                             (rep_act["analista"]==nombre)]["identificacion"].astype(str).tolist()
-        # Siempre leer el historial más fresco del session_state
-        # Esto garantiza que una gestión desde tab_bus también quite el aliado aquí
         hist_fresco = st.session_state.get("hist_df", pd.DataFrame())
         if mis_ids and not hist_fresco.empty:
             hv2 = hist_fresco.copy()
@@ -1069,9 +1168,7 @@ if perfil == "Analista":
                                        mf.to_csv(index=False).encode("utf-8"),
                                        f"historial_{fd}_{fh}.csv","text/csv")
 
-    # ─── BUSCAR ALIADO (Analista) — FIX BUG 1 ───
-    # Permite buscar cualquier cédula Y gestionar al aliado encontrado,
-    # incluso si no está en el bloque asignado del día.
+    # ─── BUSCAR ALIADO (Analista) ───
     with tab_bus:
         st.subheader("🔍 Buscar Aliado por Cédula")
         st.caption("Consulta datos, historial y registra una gestión para cualquier aliado.")
@@ -1086,7 +1183,6 @@ if perfil == "Analista":
                 fila_b = res_b.iloc[0]
                 st.success("✅ Aliado encontrado")
 
-                # ── Datos del aliado ──
                 cols_info = [c for c in ["identificacion","mensajero","celular",
                                           "zona","municipio","vehiculo","categoria",
                                           "dias","intentos","ultimo_resultado",
@@ -1101,7 +1197,6 @@ if perfil == "Analista":
                     for col in cols_info[mitad:]:
                         st.metric(col.replace("_"," ").title(), str(fila_b[col]))
 
-                # ── Historial del aliado ──
                 st.markdown("---")
                 st.markdown("#### 📋 Historial de gestiones")
                 hist_ali = hist[hist["identificacion"].astype(str) == cedula_bus.strip()].copy()
@@ -1114,11 +1209,9 @@ if perfil == "Analista":
                                  "estado":"Estado","razon":"Razón","obs":"Obs"}
                     ), use_container_width=True, hide_index=True)
 
-                # ── FIX: Formulario de gestión desde búsqueda ──
                 st.markdown("---")
                 st.markdown("#### 📞 Registrar gestión para este aliado")
 
-                # Verificar si ya fue gestionado hoy
                 ya_gestionado_hoy = False
                 if not hist.empty:
                     hv_bus = hist.copy()
@@ -1133,7 +1226,6 @@ if perfil == "Analista":
                 if ya_gestionado_hoy:
                     st.info("✅ Este aliado ya fue gestionado hoy. Puedes gestionar de nuevo si es necesario.")
 
-                # Clave única para el formulario basada en la cédula buscada
                 form_key = f"form_busq_{cedula_bus.strip()}"
                 with st.form(form_key, clear_on_submit=True):
                     cb1, cb2 = st.columns(2)
