@@ -305,6 +305,89 @@ def filtrar_pool(df):
         return pd.isna(f) or f <= now_col()
     return df[df["proxima_gestion"].apply(disponible)]
 
+# ================= SINCRONIZACIÓN RECHAZADO / PAUSADO =================
+
+def _sincronizar_rechazado(sh, identificacion, fila_base: dict):
+    """
+    Si el aliado queda NO_VOLVER → upsert en hoja RECHAZADO.
+    Si ya estaba en RECHAZADO y ahora NO es NO_VOLVER → no lo toca
+    (un rechazado nunca vuelve a activo desde aquí).
+    """
+    try:
+        ws = sh.worksheet("RECHAZADO")
+        vals = ws.get_all_values()
+        cols_rec = ["identificacion","mensajero","celular","zona","vehiculo",
+                    "ultimo_resultado","ultimo_estado","ultima_razon",
+                    "intentos","fecha_gestion"]
+        if not vals or len(vals) < 1:
+            # Hoja vacía: escribir cabecera + fila
+            ws.append_rows([cols_rec, [_safe_str(fila_base.get(c,"")) for c in cols_rec]],
+                           value_input_option="USER_ENTERED")
+            return
+        headers = vals[0]
+        # Asegurarse de que las columnas existan
+        for c in cols_rec:
+            if c not in headers:
+                headers.append(c)
+                ws.update_cell(1, len(headers), c)
+        # Buscar si ya existe
+        try:
+            col_id_idx = headers.index("identificacion") + 1
+        except ValueError:
+            return
+        id_vals = ws.col_values(col_id_idx)
+        nueva_fila = [_safe_str(fila_base.get(c,"")) for c in headers]
+        if str(identificacion) in id_vals:
+            fila_idx = id_vals.index(str(identificacion)) + 1
+            ws.update(f"A{fila_idx}", [nueva_fila])
+        else:
+            ws.append_rows([nueva_fila], value_input_option="USER_ENTERED")
+    except Exception as e:
+        st.warning(f"No se pudo actualizar RECHAZADO: {e}")
+
+
+def _sincronizar_pausado(sh, identificacion, fila_base: dict, es_pausa: bool):
+    """
+    es_pausa=True  → upsert en hoja PAUSADO.
+    es_pausa=False → eliminar de PAUSADO si estaba (ya volvió a activo o fue bloqueado).
+    """
+    try:
+        ws = sh.worksheet("PAUSADO")
+        vals = ws.get_all_values()
+        cols_pau = ["identificacion","mensajero","celular","zona","vehiculo",
+                    "ultimo_resultado","ultimo_estado","ultima_razon",
+                    "intentos","proxima_gestion","fecha_gestion"]
+        if not vals or len(vals) < 1:
+            if es_pausa:
+                ws.append_rows([cols_pau, [_safe_str(fila_base.get(c,"")) for c in cols_pau]],
+                               value_input_option="USER_ENTERED")
+            return
+        headers = vals[0]
+        for c in cols_pau:
+            if c not in headers:
+                headers.append(c)
+                ws.update_cell(1, len(headers), c)
+        try:
+            col_id_idx = headers.index("identificacion") + 1
+        except ValueError:
+            return
+        id_vals = ws.col_values(col_id_idx)
+        if es_pausa:
+            nueva_fila = [_safe_str(fila_base.get(c,"")) for c in headers]
+            if str(identificacion) in id_vals:
+                fila_idx = id_vals.index(str(identificacion)) + 1
+                ws.update(f"A{fila_idx}", [nueva_fila])
+            else:
+                ws.append_rows([nueva_fila], value_input_option="USER_ENTERED")
+        else:
+            # Quitar de PAUSADO si estaba
+            if str(identificacion) in id_vals:
+                fila_idx = id_vals.index(str(identificacion)) + 1
+                ws.delete_rows(fila_idx)
+    except Exception as e:
+        st.warning(f"No se pudo actualizar PAUSADO: {e}")
+
+
 # ================= GUARDADO =================
 def guardar_gestion(row):
     fila = [_safe_str(row.get(k,"")) for k in
