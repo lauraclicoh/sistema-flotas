@@ -1,47 +1,29 @@
-"""
-MÓDULO PIPELINE — Supplay → Implementación → Programación/Fidelización
-=======================================================================
-Este archivo se AGREGA a app_gestion_aliados.py como bloque nuevo.
-Instrucciones de integración al final del archivo.
-=======================================================================
-"""
+# =============================================================
+# implementacion.py
+# Módulo de Implementación — Aliados del 2do al 7mo cargue
+# Se importa en app.py con: from implementacion import render_implementacion
+# =============================================================
 
 import streamlit as st
 import pandas as pd
 from datetime import datetime, timedelta
 import plotly.express as px
-import plotly.graph_objects as go
-import uuid
+import time
 from zoneinfo import ZoneInfo
-
-# ─────────────────────────────────────────────
-# CONSTANTES DEL PIPELINE
-# ─────────────────────────────────────────────
 
 TZ_COL = ZoneInfo("America/Bogota")
 
 def now_col():
     return datetime.now(TZ_COL).replace(tzinfo=None)
 
-ETAPAS_PIPELINE = [
-    "SUPPLAY",
-    "IMPLEMENTACION",
-    "LISTO_PROGRAMACION",
-    "PROGRAMACION",
-    "FIDELIZADO",
-    "RIESGO",
-    "PERDIDO",
-]
+# ─────────────────────────────────────────────────────────────
+# CONSTANTES
+# ─────────────────────────────────────────────────────────────
 
-ESTADOS_PROGRAMACION = [
-    "Activo",
-    "En riesgo",
-    "Reactivado",
-    "Perdido",
-    "No interesado",
-]
+CARGUES_MIN_IMPL  = 2   # Implementación recibe desde el 2do cargue
+CARGUES_META_IMPL = 7   # Meta: llegar al 7mo cargue
 
-RESULTADOS_PROG = [
+RESULTADOS_IMPL = [
     "Apagado",
     "Fuera de servicio",
     "No contestó",
@@ -49,45 +31,44 @@ RESULTADOS_PROG = [
     "Sí contestó",
 ]
 
-RAZONES_PROG = [
-    "Tarifa",
-    "Zona",
-    "Horarios",
-    "No disponibilidad",
-    "Vehículo averiado",
-    "No responde",
-    "Trabaja fijo",
-    "Prefiere otra operación",
+ESTADOS_IMPL = [
+    "Comprometido a cargar",
+    "Interesado pero sin fecha",
+    "Necesita seguimiento",
+    "Abandona — tarifa",
+    "Abandona — zona",
+    "Abandona — vehículo averiado",
+    "Abandona — trabaja fijo",
+    "Abandona — no le interesa",
+    "Llegó al 7mo cargue",
 ]
 
-# Umbral de cargues para pasar de etapa
-CARGUES_IMPLEMENTACION = 1   # Supplay entrega desde el 1er cargue
-CARGUES_PROGRAMACION   = 7   # Implementación debe llegar a 7
-CARGUES_FIDELIZADO     = 15  # Programación define fidelizado en 15+
+RAZONES_IMPL = [
+    "Tarifa baja",
+    "Zona no le conviene",
+    "Vehículo averiado",
+    "Trabaja fijo",
+    "No disponibilidad de tiempo",
+    "Prefiere otra operación",
+    "No responde repetidamente",
+    "Cargó hoy / sigue activo",
+]
 
-# Semáforo por días sin cargar
-def calcular_semaforo(dias: int) -> str:
-    try: dias = int(dias)
-    except: return "🟢 Activo"
-    if dias <= 2:  return "🟢 Activo"
-    if dias <= 5:  return "🟡 Riesgo"
-    return "🔴 Perdido"
+ESTADOS_PIPELINE_IMPL = [
+    "Activo",
+    "En seguimiento",
+    "En riesgo de abandono",
+    "Abandonó",
+    "Completó 7 cargues",
+]
 
-def calcular_prioridad_prog(dias: int) -> str:
-    try: dias = int(dias)
-    except: return "🟢 BAJA"
-    if dias >= 6:  return "🔴 ALTA"
-    if dias >= 3:  return "🟡 MEDIA"
-    return "🟢 BAJA"
+NO_RESPONDEN_IMPL = ["Apagado", "Fuera de servicio", "No contestó", "Número errado"]
 
-# ─────────────────────────────────────────────
-# GOOGLE SHEETS — HOJAS DEL PIPELINE
-# ─────────────────────────────────────────────
-# Estas funciones usan conectar_sheets() de la app principal.
-# Se asume que conectar_sheets() ya está definida en el archivo base.
+# ─────────────────────────────────────────────────────────────
+# HELPERS
+# ─────────────────────────────────────────────────────────────
 
-def _safe_str_p(val):
-    """Conversión segura a string (versión local del módulo)."""
+def _safe(val):
     if val is None: return ""
     try:
         if pd.isna(val): return ""
@@ -98,782 +79,771 @@ def _safe_str_p(val):
     try: return str(val)
     except: return ""
 
-def leer_pipeline():
-    """Lee BASE_PIPELINE desde Google Sheets y la procesa."""
-    from app_gestion_aliados import conectar_sheets, leer_hoja  # ajustar import según tu estructura
-    if "pipeline_df" not in st.session_state or st.session_state.get("pipeline_stale", True):
-        df = leer_hoja("BASE_PIPELINE")
+def _norm_vh(v):
+    v = str(v).lower()
+    if any(k in v for k in ["carry","largenvan","large van","small van","van"]): return "Carry / Van"
+    if "moto" in v: return "Moto"
+    if any(k in v for k in ["camion","camión","truck","npr"]): return "Camión"
+    return str(v).title()
+
+def _prio_impl(cargues: int) -> str:
+    """Prioridad basada en qué tan cerca está del abandono vs la meta."""
+    try: cargues = int(cargues)
+    except: return "🟢 BAJA"
+    if cargues <= 2: return "🔴 ALTA"   # Recién llegado, mayor riesgo de abandono
+    if cargues <= 4: return "🟡 MEDIA"
+    return "🟢 BAJA"                    # Ya cerca de la meta, menor riesgo
+
+def calcular_proxima_impl(resultado, estado, intentos):
+    hoy    = now_col()
+    estado = str(estado or "")
+    if "Abandona" in estado:
+        return "NO_VOLVER"
+    if resultado in NO_RESPONDEN_IMPL:
+        if intentos >= 10: return hoy + timedelta(days=30)
+        return hoy + timedelta(days=3)
+    if estado == "Comprometido a cargar":
+        return hoy + timedelta(days=2)
+    if estado == "Interesado pero sin fecha":
+        return hoy + timedelta(days=3)
+    return hoy + timedelta(days=4)
+
+# ─────────────────────────────────────────────────────────────
+# LECTURA / ESCRITURA GOOGLE SHEETS
+# (usa leer_hoja / agregar_filas / reemplazar_hoja de app.py)
+# ─────────────────────────────────────────────────────────────
+
+def _get_impl(force=False):
+    """Carga BASE_IMPLEMENTACION con TTL 30s."""
+    from app_gestion_aliados import leer_hoja
+    ahora  = time.time()
+    ultima = st.session_state.get("impl_last_load", 0)
+    if force or "impl_df" not in st.session_state or (ahora - ultima) > 30:
+        df = leer_hoja("BASE_IMPLEMENTACION")
         if df.empty:
-            st.session_state["pipeline_df"] = None
+            st.session_state["impl_df"] = None
         else:
             df.columns = df.columns.str.strip().str.lower()
-            # Calcular campos automáticos
-            if "fecha_ultimo_cargue" in df.columns:
-                df["_fuc"] = pd.to_datetime(df["fecha_ultimo_cargue"], dayfirst=True, errors="coerce")
-                df["dias_sin_cargar"] = (now_col() - df["_fuc"]).dt.days.fillna(999).astype(int)
+            if "vehiculo" in df.columns:
+                df["vehiculo_norm"] = df["vehiculo"].apply(_norm_vh)
             else:
-                df["dias_sin_cargar"] = 999
-            if "total_cargues" not in df.columns:
-                df["total_cargues"] = 0
-            df["total_cargues"] = pd.to_numeric(df["total_cargues"], errors="coerce").fillna(0).astype(int)
-            # Semáforo y prioridad automáticos
-            df["estado_semaforo"] = df["dias_sin_cargar"].apply(calcular_semaforo)
-            df["prioridad"]       = df["dias_sin_cargar"].apply(calcular_prioridad_prog)
-            # Etapa pipeline automática según cargues (si no está seteada manualmente)
-            if "etapa_pipeline" not in df.columns:
-                df["etapa_pipeline"] = df["total_cargues"].apply(_inferir_etapa)
-            st.session_state["pipeline_df"] = df
-        st.session_state["pipeline_stale"] = False
-    return st.session_state.get("pipeline_df")
+                df["vehiculo_norm"] = "Sin vehículo"
+            df["total_cargues"] = pd.to_numeric(
+                df.get("total_cargues", 0), errors="coerce"
+            ).fillna(0).astype(int)
+            df["intentos_impl"] = pd.to_numeric(
+                df.get("intentos_impl", 0), errors="coerce"
+            ).fillna(0).astype(int)
+            df["cargues_faltantes"] = (CARGUES_META_IMPL - df["total_cargues"]).clip(lower=0)
+            df["prioridad_impl"]    = df["total_cargues"].apply(_prio_impl)
+            if "zona" not in df.columns:
+                df["zona"] = "Sin zona"
+            st.session_state["impl_df"]        = df
+            st.session_state["impl_last_load"] = ahora
+    return st.session_state.get("impl_df")
 
-def _inferir_etapa(cargues: int) -> str:
-    try: cargues = int(cargues)
-    except: return "SUPPLAY"
-    if cargues >= CARGUES_FIDELIZADO: return "FIDELIZADO"
-    if cargues > CARGUES_PROGRAMACION: return "PROGRAMACION"
-    if cargues == CARGUES_PROGRAMACION: return "LISTO_PROGRAMACION"
-    if cargues >= CARGUES_IMPLEMENTACION: return "IMPLEMENTACION"
-    return "SUPPLAY"
+def _invalidar_impl():
+    st.session_state["impl_stale"] = True
+    if "impl_df" in st.session_state:
+        del st.session_state["impl_df"]
 
-def invalidar_pipeline():
-    st.session_state["pipeline_stale"] = True
+def _get_hist_impl(force=False):
+    """Carga HIST_IMPLEMENTACION con TTL 30s."""
+    from app_gestion_aliados import leer_hoja
+    ahora  = time.time()
+    ultima = st.session_state.get("hist_impl_last", 0)
+    if force or "hist_impl_df" not in st.session_state or (ahora - ultima) > 30:
+        cols = ["fecha","analista","identificacion","resultado","estado","razon","obs","total_cargues_momento"]
+        df   = leer_hoja("HIST_IMPLEMENTACION", cols)
+        if df.empty:
+            df = pd.DataFrame(columns=cols)
+        else:
+            df["fecha"] = pd.to_datetime(df["fecha"], errors="coerce")
+            df = df.dropna(subset=["fecha"])
+        st.session_state["hist_impl_df"]   = df
+        st.session_state["hist_impl_last"] = ahora
+    return st.session_state["hist_impl_df"]
 
-def guardar_gestion_prog(row: dict):
-    """
-    Guarda una gestión en GESTIONES_PROGRAMACION.
-    row debe tener: identificacion, analista, resultado_llamada,
-                    estado_aliado, razon, observacion, proxima_gestion,
-                    total_cargues_momento, dias_sin_cargar_momento
-    """
-    from app_gestion_aliados import agregar_filas
-    gid  = str(uuid.uuid4())[:8]
-    fila = [
-        gid,
-        _safe_str_p(row.get("identificacion")),
-        _safe_str_p(row.get("analista")),
-        _safe_str_p(now_col()),
-        _safe_str_p(row.get("resultado_llamada")),
-        _safe_str_p(row.get("estado_aliado")),
-        _safe_str_p(row.get("razon")),
-        _safe_str_p(row.get("observacion")),
-        _safe_str_p(row.get("proxima_gestion")),
-        _safe_str_p(row.get("total_cargues_momento")),
-        _safe_str_p(row.get("dias_sin_cargar_momento")),
-    ]
-    agregar_filas("GESTIONES_PROGRAMACION", [fila])
-    # Actualizar estado en BASE_PIPELINE si contestó
-    if row.get("resultado_llamada") == "Sí contestó" and row.get("estado_aliado"):
-        _actualizar_estado_pipeline(
-            row["identificacion"],
-            row["estado_aliado"],
-            row.get("proxima_gestion",""),
+def _agregar_hist_impl_local(row: dict):
+    nuevo = pd.DataFrame([{
+        "fecha":                   pd.to_datetime(row.get("fecha")),
+        "analista":                _safe(row.get("analista")),
+        "identificacion":          _safe(row.get("identificacion")),
+        "resultado":               _safe(row.get("resultado")),
+        "estado":                  _safe(row.get("estado")),
+        "razon":                   _safe(row.get("razon")),
+        "obs":                     _safe(row.get("obs")),
+        "total_cargues_momento":   _safe(row.get("total_cargues_momento")),
+    }])
+    if "hist_impl_df" in st.session_state and isinstance(st.session_state["hist_impl_df"], pd.DataFrame):
+        st.session_state["hist_impl_df"] = pd.concat(
+            [st.session_state["hist_impl_df"], nuevo], ignore_index=True
         )
+    else:
+        st.session_state["hist_impl_df"] = nuevo
+    st.session_state["hist_impl_last"] = time.time()
 
-def _actualizar_estado_pipeline(identificacion, estado_aliado, proxima_gestion):
-    """Actualiza estado_programacion y proxima_gestion en BASE_PIPELINE."""
-    from app_gestion_aliados import conectar_sheets
+def _registrar_gestionado_hoy(identificacion: str, modulo: str):
+    """Registra en GESTIONADOS_HOY para evitar duplicados entre módulos."""
+    from app_gestion_aliados import agregar_filas
+    try:
+        fila = [_safe(now_col().date()), str(identificacion), modulo]
+        agregar_filas("GESTIONADOS_HOY", [fila])
+    except Exception as e:
+        pass  # No interrumpir el flujo principal por esto
+
+def _get_gestionados_hoy_todos() -> set:
+    """
+    Lee GESTIONADOS_HOY + HISTORICO para saber qué aliados
+    ya fueron gestionados hoy en CUALQUIER módulo.
+    Devuelve un set de identificaciones.
+    """
+    from app_gestion_aliados import leer_hoja
+    gestionados = set()
+    try:
+        # Desde GESTIONADOS_HOY (impl + programación)
+        df_g = leer_hoja("GESTIONADOS_HOY")
+        if not df_g.empty and "fecha" in df_g.columns:
+            df_g.columns = df_g.columns.str.lower()
+            hoy = str(now_col().date())
+            hoy_g = df_g[df_g["fecha"].astype(str).str.startswith(hoy)]
+            gestionados.update(hoy_g["identificacion"].astype(str).tolist())
+    except Exception:
+        pass
+    try:
+        # Desde HISTORICO (base de llamadas principal)
+        hist = leer_hoja("HISTORICO")
+        if not hist.empty and "fecha" in hist.columns:
+            hist.columns = hist.columns.str.lower()
+            hist["fecha"] = pd.to_datetime(hist["fecha"], errors="coerce")
+            hist = hist.dropna(subset=["fecha"])
+            hoy_h = hist[hist["fecha"].dt.date == now_col().date()]
+            gestionados.update(hoy_h["identificacion"].astype(str).tolist())
+    except Exception:
+        pass
+    return gestionados
+
+def guardar_gestion_impl(row: dict):
+    """Guarda en HIST_IMPLEMENTACION y actualiza BASE_IMPLEMENTACION."""
+    from app_gestion_aliados import agregar_filas
+    fila = [
+        _safe(now_col()),
+        _safe(row.get("analista")),
+        _safe(row.get("identificacion")),
+        _safe(row.get("resultado")),
+        _safe(row.get("estado")),
+        _safe(row.get("razon")),
+        _safe(row.get("obs")),
+        _safe(row.get("total_cargues_momento")),
+    ]
+    agregar_filas("HIST_IMPLEMENTACION", [fila])
+    _agregar_hist_impl_local(row)
+    _registrar_gestionado_hoy(row.get("identificacion",""), "IMPLEMENTACION")
+    _actualizar_crm_impl(
+        row.get("identificacion"),
+        row.get("resultado"),
+        row.get("estado"),
+        row.get("razon"),
+        row.get("total_cargues_momento", 0),
+    )
+
+def _actualizar_crm_impl(identificacion, resultado, estado, razon, total_cargues):
+    """Actualiza fila de BASE_IMPLEMENTACION con resultado de gestión."""
     import gspread
     try:
+        from app_gestion_aliados import conectar_sheets
         sh = conectar_sheets()
         if sh is None: return
-        ws = sh.worksheet("BASE_PIPELINE")
+        ws      = sh.worksheet("BASE_IMPLEMENTACION")
         headers = ws.row_values(1)
         if "identificacion" not in headers: return
         col_id  = headers.index("identificacion") + 1
         ids     = ws.col_values(col_id)
         if str(identificacion) not in ids: return
         fila    = ids.index(str(identificacion)) + 1
-        updates = []
+
+        intentos_n = 1
+        if "intentos_impl" in headers:
+            col_int = headers.index("intentos_impl") + 1
+            val_int = ws.cell(fila, col_int).value
+            try: intentos_n = int(str(val_int or "0")) + 1
+            except: intentos_n = 1
+
+        proxima = calcular_proxima_impl(resultado, estado, intentos_n)
+        proxima_str = _safe(proxima) if not isinstance(proxima, str) else proxima
+
+        # Si llegó al 7mo cargue → marcar como completado
+        estado_pipeline = "Completó 7 cargues" if (
+            str(estado) == "Llegó al 7mo cargue" or
+            int(total_cargues or 0) >= CARGUES_META_IMPL
+        ) else str(estado or "")
+
+        updates = {}
         for col_name, val in [
-            ("estado_programacion", estado_aliado),
-            ("proxima_gestion",     _safe_str_p(proxima_gestion)),
-            ("fecha_ultima_gestion",_safe_str_p(now_col())),
+            ("ultimo_resultado_impl", _safe(resultado)),
+            ("ultimo_estado_impl",    _safe(estado)),
+            ("ultima_razon_impl",     _safe(razon)),
+            ("proxima_gestion_impl",  proxima_str),
+            ("intentos_impl",         str(intentos_n)),
+            ("estado_impl",           estado_pipeline),
         ]:
             if col_name in headers:
-                c = headers.index(col_name) + 1
-                updates.append({"range": gspread.utils.rowcol_to_a1(fila, c), "values": [[val]]})
-        if updates:
-            ws.batch_update(updates)
-        invalidar_pipeline()
-    except Exception as e:
-        st.warning(f"No se pudo actualizar BASE_PIPELINE: {e}")
+                col_idx = headers.index(col_name) + 1
+                celda   = gspread.utils.rowcol_to_a1(fila, col_idx)
+                updates[celda] = val
 
-def procesar_carga_pipeline(df_nuevo: pd.DataFrame):
+        if updates:
+            ws.batch_update([{"range": k, "values": [[v]]} for k,v in updates.items()])
+        _invalidar_impl()
+    except Exception as e:
+        st.warning(f"CRM Implementación no actualizado: {e}")
+
+def cargar_base_implementacion(df_nuevo: pd.DataFrame):
     """
-    Carga incremental para BASE_PIPELINE.
-    - Si el aliado es nuevo: lo agrega con etapa inferida.
-    - Si ya existe: actualiza total_cargues, fecha_ultimo_cargue, dias_sin_cargar.
-    - Detecta si alcanzó 7 cargues y actualiza etapa a LISTO_PROGRAMACION / PROGRAMACION.
-    - Registra en HISTORIAL_CARGUES si cambió fecha_ultimo_cargue.
+    Carga incremental para BASE_IMPLEMENTACION.
+    Agrega nuevos aliados, actualiza los existentes.
+    Detecta aliados que ya llegaron a 7 cargues.
     """
-    from app_gestion_aliados import leer_hoja, reemplazar_hoja, agregar_filas
+    from app_gestion_aliados import leer_hoja, reemplazar_hoja
 
     df_nuevo = df_nuevo.copy()
-    df_nuevo.columns = (df_nuevo.columns.str.strip().str.lower()
-                        .str.replace(r"\s+","_",regex=True))
+    df_nuevo.columns = (
+        df_nuevo.columns.str.strip().str.lower()
+        .str.replace(r"\s+", "_", regex=True)
+    )
+    df_nuevo = df_nuevo[[c for c in df_nuevo.columns
+                          if c and not c.startswith("unnamed")]]
+    df_nuevo = df_nuevo.loc[:, ~df_nuevo.columns.duplicated()]
 
-    # Buscar columna de identificación
     ALIAS_ID = ["identificacion","id_aliado","cedula","id","documento"]
-    col_id = next((a for a in ALIAS_ID if a in df_nuevo.columns), None)
+    col_id   = next((a for a in ALIAS_ID if a in df_nuevo.columns), None)
     if not col_id:
-        st.error(f"No se encontró columna de identificación. Columnas: {list(df_nuevo.columns)}")
+        st.error(f"No se encontró columna de ID. Columnas: {list(df_nuevo.columns)}")
         return 0, 0, 0
 
     df_nuevo = df_nuevo.rename(columns={col_id: "identificacion"})
     df_nuevo["identificacion"] = df_nuevo["identificacion"].astype(str).str.strip()
 
-    # Leer base actual
-    base = leer_hoja("BASE_PIPELINE")
-    filas_historial = []
+    base = leer_hoja("BASE_IMPLEMENTACION")
 
+    # Primera carga
     if base.empty:
-        # Primera carga
-        base = df_nuevo.copy()
-        base.columns = base.columns.str.strip().str.lower()
-        if "total_cargues" not in base.columns: base["total_cargues"] = 1
-        base["etapa_pipeline"] = base["total_cargues"].apply(
-            lambda x: _inferir_etapa(int(float(str(x))) if str(x).strip() else 0)
-        )
-        for c in ["estado_programacion","analista_asignado","proxima_gestion",
-                  "fecha_paso_programacion","fecha_ultima_gestion"]:
-            base[c] = ""
-        reemplazar_hoja("BASE_PIPELINE", base)
-        invalidar_pipeline()
-        return len(base), 0, 0
+        for col in ["estado_impl","analista_impl","intentos_impl",
+                    "proxima_gestion_impl","ultimo_resultado_impl",
+                    "ultimo_estado_impl","ultima_razon_impl","fecha_ingreso_impl"]:
+            if col not in df_nuevo.columns:
+                df_nuevo[col] = "0" if col == "intentos_impl" else ""
+        df_nuevo["fecha_ingreso_impl"] = _safe(now_col())
+        reemplazar_hoja("BASE_IMPLEMENTACION", df_nuevo)
+        _invalidar_impl()
+        return len(df_nuevo), 0, 0
 
-    base.columns = base.columns.str.strip().str.lower()
+    base.columns = (
+        base.columns.str.strip().str.lower()
+        .str.replace(r"\s+", "_", regex=True)
+    )
     base["identificacion"] = base["identificacion"].astype(str).str.strip()
     if "total_cargues" not in base.columns: base["total_cargues"] = 0
     base["total_cargues"] = pd.to_numeric(base["total_cargues"], errors="coerce").fillna(0).astype(int)
 
     ids_existentes = set(base["identificacion"].unique())
-    nuevos_count   = 0
-    actualizados   = 0
-    ascensos       = 0
+    CRM_COLS       = ["estado_impl","analista_impl","intentos_impl","proxima_gestion_impl",
+                      "ultimo_resultado_impl","ultimo_estado_impl","ultima_razon_impl","fecha_ingreso_impl"]
 
-    for _, row in df_nuevo.iterrows():
-        idc = str(row["identificacion"]).strip()
-        if idc not in ids_existentes:
-            # Nuevo aliado
-            nueva_fila = {c: _safe_str_p(row.get(c,"")) for c in df_nuevo.columns}
-            if "total_cargues" not in nueva_fila or nueva_fila["total_cargues"] == "":
-                nueva_fila["total_cargues"] = "1"
-            tc = int(float(str(nueva_fila["total_cargues"])))
-            nueva_fila["etapa_pipeline"]        = _inferir_etapa(tc)
-            nueva_fila["estado_programacion"]   = ""
-            nueva_fila["analista_asignado"]     = ""
-            nueva_fila["proxima_gestion"]       = ""
-            nueva_fila["fecha_paso_programacion"] = ""
-            nueva_fila["fecha_ultima_gestion"]  = ""
-            base = pd.concat([base, pd.DataFrame([nueva_fila])], ignore_index=True)
-            ids_existentes.add(idc)
-            nuevos_count += 1
-            # Registro historial
-            filas_historial.append([idc, _safe_str_p(now_col()), str(tc), _inferir_etapa(tc),
-                                     _safe_str_p(row.get("zona","")), _safe_str_p(row.get("vehiculo",""))])
-        else:
-            # Aliado existente: actualizar campos operativos
-            idx = base[base["identificacion"] == idc].index[0]
-            fuc_ant = str(base.loc[idx, "fecha_ultimo_cargue"] if "fecha_ultimo_cargue" in base.columns else "")
-            fuc_new = _safe_str_p(row.get("fecha_ultimo_cargue",""))
-            tc_ant  = int(base.loc[idx, "total_cargues"])
+    nuevos    = df_nuevo[~df_nuevo["identificacion"].isin(ids_existentes)].copy()
+    for col in CRM_COLS:
+        if col not in nuevos.columns:
+            nuevos[col] = "0" if col == "intentos_impl" else ""
+    nuevos["fecha_ingreso_impl"] = _safe(now_col())
 
-            # Si la base nueva trae total_cargues úsalo; si no, incrementa si cambió fecha
-            if "total_cargues" in df_nuevo.columns and str(row.get("total_cargues","")).strip():
-                tc_new = int(float(str(row["total_cargues"])))
-            else:
-                tc_new = tc_ant + (1 if fuc_new and fuc_new != fuc_ant else 0)
+    # Actualizar existentes
+    cols_op  = [c for c in df_nuevo.columns if c not in CRM_COLS and c != "identificacion"]
+    exist_df = (
+        df_nuevo[df_nuevo["identificacion"].isin(ids_existentes)][["identificacion"]+cols_op]
+        .loc[:, ~pd.Index(["identificacion"]+cols_op).duplicated()]
+        .set_index("identificacion")
+    )
+    base_idx = base.set_index("identificacion")
+    for col in cols_op:
+        if col not in exist_df.columns: continue
+        col_data = exist_df[[col]]
+        if col in base_idx.columns: base_idx.update(col_data)
+        else: base_idx = base_idx.join(col_data, how="left")
 
-            base.loc[idx, "total_cargues"]      = tc_new
-            if "fecha_ultimo_cargue" in df_nuevo.columns:
-                base.loc[idx, "fecha_ultimo_cargue"] = fuc_new
+    # Detectar cuántos completaron los 7 cargues ahora
+    completados_ahora = 0
+    if "total_cargues" in base_idx.columns:
+        tc_nuevo = pd.to_numeric(base_idx["total_cargues"], errors="coerce").fillna(0).astype(int)
+        completados_ahora = (tc_nuevo >= CARGUES_META_IMPL).sum()
 
-            # Calcular nueva etapa
-            etapa_ant = str(base.loc[idx, "etapa_pipeline"] if "etapa_pipeline" in base.columns else "")
-            etapa_new = _inferir_etapa(tc_new)
+    base_act  = base_idx.reset_index()
+    base_final = pd.concat([base_act, nuevos], ignore_index=True).fillna("")
+    base_final = base_final.loc[:, ~base_final.columns.duplicated()]
 
-            # No retroceder etapa si ya está en FIDELIZADO o PROGRAMACION
-            if etapa_ant in ("FIDELIZADO", "PROGRAMACION") and etapa_new not in ("FIDELIZADO",):
-                etapa_new = etapa_ant
-            if etapa_new != etapa_ant:
-                base.loc[idx, "etapa_pipeline"] = etapa_new
-                ascensos += 1
-                # Si acaba de pasar a LISTO_PROGRAMACION o PROGRAMACION → registrar fecha
-                if etapa_new in ("LISTO_PROGRAMACION","PROGRAMACION") and etapa_ant not in ("LISTO_PROGRAMACION","PROGRAMACION","FIDELIZADO"):
-                    base.loc[idx, "fecha_paso_programacion"] = _safe_str_p(now_col())
-                # Historial de ascenso
-                filas_historial.append([idc, _safe_str_p(now_col()), str(tc_new), etapa_new,
-                                         _safe_str_p(row.get("zona","")), _safe_str_p(row.get("vehiculo",""))])
-            actualizados += 1
+    reemplazar_hoja("BASE_IMPLEMENTACION", base_final)
+    _invalidar_impl()
+    return len(nuevos), len(exist_df), int(completados_ahora)
 
-    reemplazar_hoja("BASE_PIPELINE", base)
-    if filas_historial:
-        agregar_filas("HISTORIAL_CARGUES", filas_historial)
-    invalidar_pipeline()
-    return nuevos_count, actualizados, ascensos
+# ─────────────────────────────────────────────────────────────
+# UI — COORDINADOR: DASHBOARD IMPLEMENTACIÓN
+# ─────────────────────────────────────────────────────────────
 
-
-def leer_gestiones_prog() -> pd.DataFrame:
-    """Lee GESTIONES_PROGRAMACION con TTL 30s."""
-    from app_gestion_aliados import leer_hoja
-    import time
-    ahora  = time.time()
-    ultima = st.session_state.get("gprog_last", 0)
-    if "gprog_df" not in st.session_state or (ahora - ultima) > 30:
-        cols = ["id_gestion","identificacion","analista","fecha_gestion",
-                "resultado_llamada","estado_aliado","razon","observacion",
-                "proxima_gestion","total_cargues_momento","dias_sin_cargar_momento"]
-        df = leer_hoja("GESTIONES_PROGRAMACION", cols)
-        if df.empty: df = pd.DataFrame(columns=cols)
-        else:
-            df["fecha_gestion"] = pd.to_datetime(df["fecha_gestion"], errors="coerce")
-            df = df.dropna(subset=["fecha_gestion"])
-        st.session_state["gprog_df"]   = df
-        st.session_state["gprog_last"] = ahora
-    return st.session_state["gprog_df"]
-
-# ─────────────────────────────────────────────
-# CALCULAR PRÓXIMA GESTIÓN (Programación)
-# ─────────────────────────────────────────────
-
-def calcular_proxima_prog(resultado, estado, dias_sin_cargar):
-    hoy    = now_col()
-    estado = str(estado or "")
-    if estado in ("Perdido", "No interesado"):
-        return "NO_VOLVER"
-    no_resp = ["Apagado","Fuera de servicio","No contestó","Número errado"]
-    if resultado in no_resp:
-        if int(dias_sin_cargar or 0) >= 6:
-            return hoy + timedelta(days=2)   # Alta prioridad, volver pronto
-        return hoy + timedelta(days=3)
-    if estado == "Reactivado":
-        return hoy + timedelta(days=5)
-    if estado == "En riesgo":
-        return hoy + timedelta(days=2)
-    return hoy + timedelta(days=5)
-
-# ─────────────────────────────────────────────
-# MÓDULO UI — COORDINADOR: PIPELINE DASHBOARD
-# ─────────────────────────────────────────────
-
-def render_pipeline_coordinador(nombres_analistas: list):
+def render_dashboard_implementacion():
     """
-    Renderiza las pestañas del pipeline para el Coordinador.
-    Llamar desde el bloque del Coordinador en la app principal.
+    Pestañas de Implementación para el Coordinador.
+    Llamar con: render_dashboard_implementacion()
     """
-    df = leer_pipeline()
-    gest = leer_gestiones_prog()
+    df   = _get_impl()
+    hist = _get_hist_impl()
 
-    tab_emb, tab_sup, tab_impl, tab_prog, tab_carga_pip = st.tabs([
-        "🔭 Embudo Pipeline",
-        "📦 Supplay",
-        "⚙️ Implementación",
-        "🎯 Programación / Dashboard",
-        "📤 Cargar Base Pipeline",
+    tab_res, tab_kpi, tab_carga = st.tabs([
+        "📊 Resumen Implementación",
+        "📈 KPIs y análisis",
+        "📤 Cargar base",
     ])
 
-    # ── EMBUDO ──────────────────────────────
-    with tab_emb:
-        st.subheader("Embudo completo Supplay → Fidelizado")
+    # ── RESUMEN ──────────────────────────────────────────────
+    with tab_res:
+        st.subheader("Resumen — Implementación")
+        if st.button("🔄 Actualizar", key="impl_ref_coord"):
+            _get_impl(force=True)
+            _get_hist_impl(force=True)
+            st.rerun()
+
         if df is None:
-            st.warning("Carga la base pipeline primero (pestaña Cargar Base Pipeline).")
-        else:
-            c1,c2,c3,c4,c5 = st.columns(5)
-            cnt = lambda etapa: len(df[df["etapa_pipeline"]==etapa])
-            c1.metric("📦 Supplay",       cnt("SUPPLAY"))
-            c2.metric("⚙️ Implementación", cnt("IMPLEMENTACION"))
-            c3.metric("🎯 Programación",  cnt("PROGRAMACION") + cnt("LISTO_PROGRAMACION"))
-            c4.metric("🏆 Fidelizados",   cnt("FIDELIZADO"))
-            c5.metric("⚠️ En riesgo",     len(df[df["estado_semaforo"]=="🟡 Riesgo"]) +
-                                          len(df[df["estado_semaforo"]=="🔴 Perdido"]))
+            st.warning("Carga la base de Implementación primero.")
+            return
 
-            st.markdown("---")
-            # Embudo visual
-            total_sup  = cnt("SUPPLAY") + cnt("IMPLEMENTACION") + cnt("PROGRAMACION") + cnt("LISTO_PROGRAMACION") + cnt("FIDELIZADO")
-            total_impl = cnt("IMPLEMENTACION") + cnt("PROGRAMACION") + cnt("LISTO_PROGRAMACION") + cnt("FIDELIZADO")
-            total_prog = cnt("PROGRAMACION") + cnt("LISTO_PROGRAMACION") + cnt("FIDELIZADO")
-            total_fid  = cnt("FIDELIZADO")
-            emb = pd.DataFrame({
-                "Etapa":    ["Supplay (1er cargue)","Implementación (2-7)","Programación (8+)","Fidelizado (15+)"],
-                "Cantidad": [total_sup, total_impl, total_prog, total_fid],
-            })
-            emb["% conv."] = (emb["Cantidad"] / max(total_sup,1) * 100).round(1)
-            st.dataframe(emb, use_container_width=True, hide_index=True)
-            st.plotly_chart(
-                px.funnel(emb, x="Cantidad", y="Etapa",
-                          title="Embudo de conversión por etapa",
-                          color_discrete_sequence=["#1D9E75","#534AB7","#185FA5","#3B6D11"]),
-                use_container_width=True
-            )
-            # Semáforo solo para Programación
-            prog_df = df[df["etapa_pipeline"].isin(["PROGRAMACION","LISTO_PROGRAMACION","FIDELIZADO"])].copy()
-            if not prog_df.empty:
-                st.markdown("---")
-                st.markdown("#### Semáforo — aliados en Programación")
-                ca,cm,cr = st.columns(3)
-                ca.metric("🟢 Activos",  len(prog_df[prog_df["estado_semaforo"]=="🟢 Activo"]))
-                cm.metric("🟡 Riesgo",   len(prog_df[prog_df["estado_semaforo"]=="🟡 Riesgo"]))
-                cr.metric("🔴 Perdidos", len(prog_df[prog_df["estado_semaforo"]=="🔴 Perdido"]))
-                dist = prog_df["estado_semaforo"].value_counts().reset_index()
-                dist.columns = ["semaforo","cantidad"]
-                st.plotly_chart(
-                    px.pie(dist, values="cantidad", names="semaforo",
-                           color="semaforo",
-                           color_discrete_map={"🟢 Activo":"#28a745","🟡 Riesgo":"#ffc107","🔴 Perdido":"#dc3545"},
-                           title="Distribución semáforo"),
-                    use_container_width=True
-                )
+        activos      = df[~df.get("estado_impl","").astype(str).str.contains("Abandona|Completó", na=False)]
+        completados  = df[df.get("estado_impl","").astype(str).str.contains("Completó", na=False)]
+        abandonaron  = df[df.get("estado_impl","").astype(str).str.contains("Abandona", na=False)]
 
-    # ── SUPPLAY ─────────────────────────────
-    with tab_sup:
-        st.subheader("📦 Métricas Supplay")
+        c1,c2,c3,c4 = st.columns(4)
+        c1.metric("Total base", len(df))
+        c2.metric("Activos en seguimiento", len(activos))
+        c3.metric("Completaron 7 cargues", len(completados),
+                  delta=f"{round(len(completados)/max(len(df),1)*100,1)}%")
+        c4.metric("Abandonaron", len(abandonaron),
+                  delta=f"-{round(len(abandonaron)/max(len(df),1)*100,1)}%")
+
+        st.markdown("---")
+        st.markdown("#### Distribución por cargues actuales")
+        hist_c = df["total_cargues"].value_counts().sort_index().reset_index()
+        hist_c.columns = ["Cargues", "Aliados"]
+        st.plotly_chart(
+            px.bar(hist_c, x="Cargues", y="Aliados",
+                   title="¿En qué cargue están los aliados de Implementación?",
+                   color_discrete_sequence=["#534AB7"]),
+            use_container_width=True
+        )
+
+        # Alta prioridad (riesgo de abandono)
+        alta = df[df["prioridad_impl"] == "🔴 ALTA"].copy()
+        if not alta.empty:
+            st.markdown(f"---\n#### 🔴 Alta prioridad — {len(alta)} aliados en 2do cargue (mayor riesgo)")
+            cols_a = [c for c in ["identificacion","nombre","celular","zona","vehiculo_norm",
+                                   "total_cargues","cargues_faltantes","analista_impl","estado_impl"]
+                      if c in alta.columns]
+            st.dataframe(alta[cols_a], use_container_width=True, hide_index=True)
+
+        # Listos para pasar a Programación
+        listos = df[df["total_cargues"] >= CARGUES_META_IMPL].copy()
+        if not listos.empty:
+            st.markdown(f"---\n#### ✅ {len(listos)} aliados lograron 7 cargues — listos para Programación")
+            cols_l = [c for c in ["identificacion","nombre","celular","zona","vehiculo_norm","total_cargues"]
+                      if c in listos.columns]
+            st.dataframe(listos[cols_l], use_container_width=True, hide_index=True)
+            st.download_button("📥 Descargar listos para Programación",
+                               listos.to_csv(index=False).encode("utf-8"),
+                               "listos_programacion.csv", "text/csv")
+
+    # ── KPIs ─────────────────────────────────────────────────
+    with tab_kpi:
+        st.subheader("KPIs Implementación")
         if df is None:
-            st.warning("Carga la base pipeline primero.")
-        else:
-            sup = df[df["etapa_pipeline"]=="SUPPLAY"].copy()
-            impl_mas = df[df["etapa_pipeline"].isin(["IMPLEMENTACION","PROGRAMACION","LISTO_PROGRAMACION","FIDELIZADO"])].copy()
-            total_entregados = len(df)  # Todos los que Supplay entregó históricamente
-            total_segundo    = len(impl_mas)
-            total_7          = len(df[df["total_cargues"] >= CARGUES_PROGRAMACION])
-            total_fid2       = len(df[df["etapa_pipeline"]=="FIDELIZADO"])
+            st.warning("Carga la base primero.")
+            return
 
-            c1,c2,c3,c4 = st.columns(4)
-            c1.metric("Entregados por Supplay",   total_entregados)
-            c2.metric("Hicieron 2do+ cargue",     total_segundo,
-                      delta=f"{round(total_segundo/max(total_entregados,1)*100,1)}%")
-            c3.metric("Llegaron a 7 cargues",     total_7,
-                      delta=f"{round(total_7/max(total_entregados,1)*100,1)}%")
-            c4.metric("Fidelizados (15+)",         total_fid2,
-                      delta=f"{round(total_fid2/max(total_entregados,1)*100,1)}%")
+        total         = len(df)
+        conv_7        = len(df[df["total_cargues"] >= CARGUES_META_IMPL])
+        pct_conv      = round(conv_7 / max(total,1) * 100, 1)
+        pct_abnd      = round(len(df[df.get("estado_impl","").astype(str).str.contains("Abandona", na=False)])
+                              / max(total,1) * 100, 1)
 
+        c1,c2,c3 = st.columns(3)
+        c1.metric("% conversión a 7 cargues", f"{pct_conv}%")
+        c2.metric("% abandono", f"{pct_abnd}%")
+        c3.metric("Cargue promedio base activa",
+                  f"{df['total_cargues'].mean():.1f}" if total else "N/A")
+
+        st.markdown("---")
+        if "zona" in df.columns:
+            st.markdown("#### Conversión por zona")
+            zona_g = df.groupby("zona").agg(
+                total=("identificacion","count"),
+                completaron=("total_cargues", lambda x: (x >= CARGUES_META_IMPL).sum())
+            ).reset_index()
+            zona_g["% conv"] = (zona_g["completaron"]/zona_g["total"]*100).round(1)
+            st.dataframe(zona_g.sort_values("% conv", ascending=False),
+                         use_container_width=True, hide_index=True)
+
+        if "vehiculo_norm" in df.columns:
+            st.markdown("#### Conversión por tipo de vehículo")
+            veh_g = df.groupby("vehiculo_norm").agg(
+                total=("identificacion","count"),
+                completaron=("total_cargues", lambda x: (x >= CARGUES_META_IMPL).sum())
+            ).reset_index()
+            veh_g["% conv"] = (veh_g["completaron"]/veh_g["total"]*100).round(1)
+            st.dataframe(veh_g.sort_values("% conv", ascending=False),
+                         use_container_width=True, hide_index=True)
+
+        if not hist.empty:
             st.markdown("---")
-            st.markdown(f"**Aliados que NO volvieron a cargar:** {len(sup)} ({round(len(sup)/max(total_entregados,1)*100,1)}%)")
-            if not sup.empty:
-                cols_s = [c for c in ["identificacion","nombre","celular","zona","vehiculo",
-                                       "fecha_ultimo_cargue","total_cargues"] if c in sup.columns]
-                st.dataframe(sup[cols_s], use_container_width=True, hide_index=True)
-            st.download_button("📥 Descargar aliados no convertidos (Supplay)",
-                               sup.to_csv(index=False).encode("utf-8"),
-                               "supplay_no_convertidos.csv","text/csv")
+            st.markdown("#### Razones de abandono")
+            abd = hist[hist["estado"].astype(str).str.contains("Abandona", na=False)]
+            if not abd.empty:
+                rz = abd["razon"].value_counts().reset_index()
+                rz.columns = ["Razón","Cantidad"]
+                st.dataframe(rz, use_container_width=True, hide_index=True)
 
-    # ── IMPLEMENTACIÓN ──────────────────────
-    with tab_impl:
-        st.subheader("⚙️ Métricas Implementación")
-        if df is None:
-            st.warning("Carga la base pipeline primero.")
-        else:
-            impl = df[df["etapa_pipeline"]=="IMPLEMENTACION"].copy()
-            total_impl_hist = len(df[df["total_cargues"] >= CARGUES_IMPLEMENTACION])
-            total_conv_7    = len(df[df["total_cargues"] >= CARGUES_PROGRAMACION])
-            pct_conv        = round(total_conv_7 / max(total_impl_hist,1) * 100, 1)
-
-            c1,c2,c3 = st.columns(3)
-            c1.metric("En Implementación ahora",  len(impl))
-            c2.metric("Lograron 7 cargues (hist.)", total_conv_7,
-                      delta=f"{pct_conv}% conversión")
-            c3.metric("Promedio cargues actuales",
-                      f"{impl['total_cargues'].mean():.1f}" if not impl.empty else "N/A")
-
-            st.markdown("---")
-            if not impl.empty:
-                st.markdown("#### Punto de abandono — distribución por cargue actual")
-                hist_c = impl["total_cargues"].value_counts().sort_index().reset_index()
-                hist_c.columns = ["cargue","cantidad"]
-                st.plotly_chart(
-                    px.bar(hist_c, x="cargue", y="cantidad",
-                           title="¿En qué cargue están los aliados de Implementación?",
-                           labels={"cargue":"Número de cargue","cantidad":"Aliados"},
-                           color_discrete_sequence=["#534AB7"]),
-                    use_container_width=True
-                )
-                st.markdown("#### Mejor conversión por vehículo")
-                if "vehiculo" in impl.columns:
-                    veh = impl.groupby("vehiculo")["total_cargues"].mean().round(1).reset_index()
-                    veh.columns = ["Vehículo","Promedio cargues"]
-                    st.dataframe(veh.sort_values("Promedio cargues", ascending=False),
-                                 use_container_width=True, hide_index=True)
-                st.markdown("#### Mejor conversión por zona")
-                if "zona" in impl.columns:
-                    zon = impl.groupby("zona")["total_cargues"].mean().round(1).reset_index()
-                    zon.columns = ["Zona","Promedio cargues"]
-                    st.dataframe(zon.sort_values("Promedio cargues", ascending=False),
-                                 use_container_width=True, hide_index=True)
-            # Listos para pasar
-            listos = df[df["etapa_pipeline"]=="LISTO_PROGRAMACION"].copy()
-            if not listos.empty:
-                st.markdown(f"---\n#### ✅ Listos para Programación ({len(listos)} aliados con 7 cargues)")
-                cols_l = [c for c in ["identificacion","nombre","celular","zona","vehiculo",
-                                       "total_cargues","fecha_ultimo_cargue"] if c in listos.columns]
-                st.dataframe(listos[cols_l], use_container_width=True, hide_index=True)
-
-    # ── PROGRAMACIÓN DASHBOARD ──────────────
-    with tab_prog:
-        st.subheader("🎯 Dashboard Programación / Fidelización")
-        if df is None:
-            st.warning("Carga la base pipeline primero.")
-        elif gest.empty and df is not None:
-            prog_df2 = df[df["etapa_pipeline"].isin(["PROGRAMACION","LISTO_PROGRAMACION","FIDELIZADO"])].copy()
-            st.info(f"{len(prog_df2)} aliados en Programación. Aún no hay gestiones registradas.")
-        else:
-            prog_df2 = df[df["etapa_pipeline"].isin(["PROGRAMACION","LISTO_PROGRAMACION","FIDELIZADO"])].copy()
-            c1,c2,c3,c4,c5 = st.columns(5)
-            c1.metric("Total en Programación", len(prog_df2))
-            c2.metric("🏆 Fidelizados",
-                      len(prog_df2[prog_df2["etapa_pipeline"]=="FIDELIZADO"]))
-            c3.metric("🟡 En riesgo",
-                      len(prog_df2[prog_df2["estado_semaforo"]=="🟡 Riesgo"]))
-            c4.metric("🔴 Perdidos",
-                      len(prog_df2[prog_df2["estado_semaforo"]=="🔴 Perdido"]))
-            reactivados = len(gest[gest["estado_aliado"]=="Reactivado"].drop_duplicates("identificacion"))
-            c5.metric("♻️ Reactivaciones", reactivados)
-
-            st.markdown("---")
-            # Ranking analistas
-            if not gest.empty and "analista" in gest.columns:
-                st.markdown("#### Ranking analistas — gestiones")
-                rk = gest.groupby("analista").agg(
-                    llamadas=("id_gestion","count"),
-                    contactados=("resultado_llamada", lambda x: (x=="Sí contestó").sum()),
-                    reactivados=("estado_aliado", lambda x: (x=="Reactivado").sum()),
-                ).reset_index()
-                rk["% contacto"] = (rk["contactados"]/rk["llamadas"]*100).round(1)
-                st.dataframe(rk.sort_values("llamadas", ascending=False),
-                             use_container_width=True, hide_index=True)
-
-            # Aliados de alta prioridad
-            alta = prog_df2[prog_df2["prioridad"]=="🔴 ALTA"].copy()
-            if not alta.empty:
-                st.markdown(f"---\n#### 🔴 Alta prioridad — {len(alta)} aliados con 6+ días sin cargar")
-                cols_a = [c for c in ["identificacion","nombre","celular","zona","vehiculo",
-                                       "total_cargues","dias_sin_cargar","estado_semaforo",
-                                       "analista_asignado"] if c in alta.columns]
-                st.dataframe(alta[cols_a].sort_values("dias_sin_cargar", ascending=False),
-                             use_container_width=True, hide_index=True)
-
-    # ── CARGAR BASE PIPELINE ─────────────────
-    with tab_carga_pip:
-        st.subheader("📤 Cargar Base Pipeline")
+    # ── CARGA ─────────────────────────────────────────────────
+    with tab_carga:
+        st.subheader("📤 Cargar base de Implementación")
         st.info("""
 **Columnas esperadas en el Excel:**
-`identificacion`, `nombre`, `celular`, `vehiculo`, `zona`,
-`fecha_ultimo_cargue`, `total_cargues` *(opcional pero recomendado)*,
-`fecha_entrega_supplay` *(opcional)*
+`identificacion`, `nombre`, `celular`, `vehiculo`, `zona`, `total_cargues`, `fecha_ultimo_cargue`
 
-Si `total_cargues` no está disponible, la app lo irá acumulando
-detectando cambios en `fecha_ultimo_cargue` en cada carga diaria.
-""")
-        archivo = st.file_uploader("Excel (.xlsx) — base diaria pipeline", type=["xlsx"], key="uploader_pip")
+Los campos CRM (estado, intentos, próxima gestión) se agregan automáticamente.
+Aliados que ya estén en la base se actualizan sin perder su historial CRM.
+        """)
+        archivo = st.file_uploader("Excel (.xlsx)", type=["xlsx"], key="uploader_impl_coord")
         if archivo:
             try:
                 df_s = pd.read_excel(archivo, engine="openpyxl")
                 df_s = df_s[[c for c in df_s.columns if not str(c).startswith("Unnamed")]]
+                df_s = df_s.fillna("")
                 st.success(f"{len(df_s):,} registros leídos")
                 st.dataframe(df_s.head(5), use_container_width=True)
-                if st.button("🚀 Procesar carga pipeline"):
+                if st.button("🚀 Cargar a Implementación"):
                     with st.spinner("Procesando..."):
-                        nn, na, asc = procesar_carga_pipeline(df_s)
-                    st.success(f"✅ {nn} nuevos · {na} actualizados · {asc} aliados ascendieron de etapa")
+                        nn, na, nc = cargar_base_implementacion(df_s)
+                    st.success(f"✅ {nn} nuevos · {na} actualizados · {nc} ya completaron 7 cargues")
             except Exception as e:
                 st.error(f"Error: {e}")
 
-        # Asignación de analistas a Programación
         st.markdown("---")
-        st.markdown("#### Asignación de analistas a Programación")
-        pip_actual = leer_pipeline()
-        if pip_actual is not None:
-            prog_sin = pip_actual[
-                pip_actual["etapa_pipeline"].isin(["PROGRAMACION","LISTO_PROGRAMACION"]) &
-                (pip_actual.get("analista_asignado", pd.Series(dtype=str)).fillna("").str.strip() == "")
-            ].copy() if "analista_asignado" in pip_actual.columns else pd.DataFrame()
+        st.markdown("#### Asignación de analistas")
+        df_actual = _get_impl()
+        if df_actual is not None and "analista_impl" in df_actual.columns:
+            sin_asignar = df_actual[
+                df_actual["analista_impl"].fillna("").str.strip() == ""
+            ]
+            if not sin_asignar.empty:
+                st.warning(f"{len(sin_asignar)} aliados sin analista asignado en Implementación.")
 
-            if not prog_sin.empty:
-                st.warning(f"{len(prog_sin)} aliados en Programación sin analista asignado.")
-            modo_asig = st.selectbox("Modo asignación", ["Automático (balanceado)", "Manual por zona"])
-            if modo_asig == "Automático (balanceado)" and st.button("Asignar analistas automáticamente"):
-                _asignar_analiistas_automatico(nombres_analistas)
-            elif modo_asig == "Manual por zona":
-                st.info("Configura asignaciones en la pestaña Asignación de la app principal.")
+# ─────────────────────────────────────────────────────────────
+# UI — ANALISTA: CRM IMPLEMENTACIÓN
+# ─────────────────────────────────────────────────────────────
 
-
-def _asignar_analiistas_automatico(nombres_analistas: list):
-    """Distribuye aliados de Programación sin asignar entre los analistas de forma balanceada."""
-    from app_gestion_aliados import conectar_sheets
-    import gspread
-    try:
-        pip = leer_pipeline()
-        if pip is None: return
-        sin_asignar = pip[
-            pip["etapa_pipeline"].isin(["PROGRAMACION","LISTO_PROGRAMACION"]) &
-            (pip.get("analista_asignado", pd.Series(dtype=str)).fillna("").str.strip() == "")
-        ].copy() if "analista_asignado" in pip.columns else pd.DataFrame()
-
-        if sin_asignar.empty:
-            st.info("Todos los aliados ya tienen analista asignado.")
-            return
-        # Round-robin
-        asignaciones = {}
-        for i, idc in enumerate(sin_asignar["identificacion"].tolist()):
-            asignaciones[str(idc)] = nombres_analistas[i % len(nombres_analistas)]
-        # Escribir en Sheets
-        sh = conectar_sheets()
-        if sh is None: return
-        ws = sh.worksheet("BASE_PIPELINE")
-        headers = ws.row_values(1)
-        if "identificacion" not in headers or "analista_asignado" not in headers: return
-        col_id  = headers.index("identificacion") + 1
-        col_ana = headers.index("analista_asignado") + 1
-        ids_col = ws.col_values(col_id)
-        updates = []
-        for idc, analista in asignaciones.items():
-            if idc in ids_col:
-                fila = ids_col.index(idc) + 1
-                updates.append({"range": gspread.utils.rowcol_to_a1(fila, col_ana), "values": [[analista]]})
-        if updates:
-            ws.batch_update(updates)
-        invalidar_pipeline()
-        st.success(f"✅ {len(asignaciones)} aliados asignados.")
-    except Exception as e:
-        st.error(f"Error en asignación automática: {e}")
-
-
-# ─────────────────────────────────────────────
-# MÓDULO UI — ANALISTA: CRM PROGRAMACIÓN
-# ─────────────────────────────────────────────
-
-def render_crm_programacion(nombre_analista: str):
+def render_crm_analista_impl(nombre_analista: str):
     """
-    Renderiza el tab CRM de Programación para el Analista.
-    Llamar desde el bloque del Analista en la app principal.
+    Módulo CRM completo para el analista de Implementación.
+    Llamar con: render_crm_analista_impl(nombre)
     """
-    pip = leer_pipeline()
-    gest = leer_gestiones_prog()
+    df   = _get_impl()
+    hist = _get_hist_impl()
 
-    tab_mis, tab_buscar, tab_res = st.tabs([
-        "📞 Mis aliados — Programación",
+    tab_mis, tab_buscar, tab_hoy = st.tabs([
+        "📞 Mis aliados — Implementación",
         "🔍 Buscar aliado",
-        "📊 Mi rendimiento",
+        "📊 Mi resumen de hoy",
     ])
 
-    # ── MIS ALIADOS ──────────────────────────
+    # ── MIS ALIADOS ──────────────────────────────────────────
     with tab_mis:
-        if pip is None:
-            st.warning("La base pipeline aún no está cargada.")
+        if df is None:
+            st.warning("La base de Implementación no está cargada todavía.")
             return
 
-        # Filtrar aliados de este analista en Programación
-        mis_aliados = pip[
-            (pip["etapa_pipeline"].isin(["PROGRAMACION","LISTO_PROGRAMACION"])) &
-            (pip.get("analista_asignado", pd.Series(dtype=str)).fillna("") == nombre_analista)
-        ].copy() if "analista_asignado" in pip.columns else pd.DataFrame()
+        # Aliados asignados a este analista
+        if "analista_impl" in df.columns:
+            mis = df[df["analista_impl"].astype(str) == nombre_analista].copy()
+        else:
+            mis = df.copy()
 
-        if mis_aliados.empty:
-            st.info("No tienes aliados asignados en Programación. Pídele al coordinador que te asigne.")
-            return
+        # Filtrar los que NO han completado los 7 cargues ni abandonaron
+        mis = mis[~mis.get("estado_impl","").astype(str).str.contains("Completó|Abandona", na=False)]
+        mis = mis[mis.get("proxima_gestion_impl","").astype(str).str.upper() != "NO_VOLVER"]
 
-        # Excluir ya gestionados hoy
-        if not gest.empty:
-            gv = gest.copy()
-            gv["fecha_gestion"] = pd.to_datetime(gv["fecha_gestion"], errors="coerce")
-            gv = gv.dropna(subset=["fecha_gestion"])
-            ya_hoy = gv[gv["fecha_gestion"].dt.date == now_col().date()]["identificacion"].astype(str).tolist()
-            mis_aliados = mis_aliados[~mis_aliados["identificacion"].astype(str).isin(ya_hoy)]
+        # Filtrar por proxima_gestion_impl
+        def disponible(v):
+            v = str(v).strip()
+            if v in ("","nan","None","0","NO_VOLVER"): return True
+            f = pd.to_datetime(v, errors="coerce")
+            return pd.isna(f) or f <= now_col()
+        if "proxima_gestion_impl" in mis.columns:
+            mis = mis[mis["proxima_gestion_impl"].apply(disponible)]
 
-        # Excluir NO_VOLVER
-        if "proxima_gestion" in mis_aliados.columns:
-            mis_aliados = mis_aliados[mis_aliados["proxima_gestion"].astype(str).str.upper() != "NO_VOLVER"]
-            def disponible_hoy(v):
-                v = str(v).strip()
-                if v in ("","nan","None","0"): return True
-                f = pd.to_datetime(v, errors="coerce")
-                return pd.isna(f) or f <= now_col()
-            mis_aliados = mis_aliados[mis_aliados["proxima_gestion"].apply(disponible_hoy)]
+        # Excluir gestionados hoy en CUALQUIER módulo
+        gestionados_hoy = _get_gestionados_hoy_todos()
+        ya_hoy_impl_local = set()
+        if not hist.empty:
+            h_hoy = hist.copy()
+            h_hoy["fecha"] = pd.to_datetime(h_hoy["fecha"], errors="coerce")
+            h_hoy = h_hoy.dropna(subset=["fecha"])
+            ya_hoy_impl_local = set(
+                h_hoy[h_hoy["fecha"].dt.date == now_col().date()]["identificacion"].astype(str).tolist()
+            )
+
+        # Los que ya fueron gestionados hoy (cualquier módulo)
+        todos_gestionados_hoy = gestionados_hoy | ya_hoy_impl_local
+
+        # Separar: gestionados hoy (mostrar aviso) vs pendientes
+        mis["_ya_hoy"] = mis["identificacion"].astype(str).isin(todos_gestionados_hoy)
+        pendientes      = mis[~mis["_ya_hoy"]].copy()
+        ya_gestionados  = mis[mis["_ya_hoy"]].copy()
 
         # Ordenar por prioridad
-        orden_p = {"🔴 ALTA":0, "🟡 MEDIA":1, "🟢 BAJA":2}
-        mis_aliados["_ord"] = mis_aliados["prioridad"].map(orden_p).fillna(3)
-        mis_aliados = mis_aliados.sort_values("_ord").drop(columns=["_ord"]).reset_index(drop=True)
+        orden = {"🔴 ALTA":0,"🟡 MEDIA":1,"🟢 BAJA":2}
+        pendientes["_ord"] = pendientes["prioridad_impl"].map(orden).fillna(3)
+        pendientes = pendientes.sort_values("_ord").drop(columns=["_ord","_ya_hoy"]).reset_index(drop=True)
 
-        hechas = st.session_state.get("prog_hechas", 0)
-        pend   = len(mis_aliados)
-        pct    = int(hechas / max(hechas + pend, 1) * 100)
-        st.progress(pct, text=f"Progreso: {hechas} gestionados · {pend} pendientes")
+        # Progreso
+        hechas = st.session_state.get("impl_hechas", 0)
+        pend_n = len(pendientes)
+        pct    = int(hechas / max(hechas + pend_n, 1) * 100)
+        st.progress(pct, text=f"Progreso: {hechas} gestionados · {pend_n} pendientes")
 
-        # Tabla resumen
-        cols_v = [c for c in ["identificacion","nombre","celular","zona","vehiculo",
-                               "total_cargues","dias_sin_cargar","estado_semaforo","prioridad"]
-                  if c in mis_aliados.columns]
-        st.markdown(f"#### Pendientes hoy ({pend})")
-        st.dataframe(mis_aliados[cols_v], use_container_width=True, hide_index=True)
+        # ── AVISO DE DUPLICADOS ──────────────────────────────
+        if not ya_gestionados.empty:
+            with st.expander(f"⚠️ {len(ya_gestionados)} aliados ya gestionados hoy en otro módulo — puedes gestionarlos igual"):
+                cols_dup = [c for c in ["identificacion","nombre","celular","total_cargues","prioridad_impl"]
+                            if c in ya_gestionados.columns]
+                st.dataframe(ya_gestionados[cols_dup], use_container_width=True, hide_index=True)
+                st.caption("Estos aliados aparecen en la base de llamadas principal o ya fueron llamados hoy en Implementación.")
 
-        # Formulario de gestión
+        # Tabla de pendientes
+        cols_v = [c for c in ["identificacion","nombre","celular","zona","vehiculo_norm",
+                               "total_cargues","cargues_faltantes","prioridad_impl","estado_impl"]
+                  if c in pendientes.columns]
+        st.markdown(f"#### Pendientes ({pend_n})")
+        st.dataframe(pendientes[cols_v], use_container_width=True, hide_index=True)
+
+        # ── FORMULARIO DE GESTIÓN ────────────────────────────
         st.markdown("---")
         st.markdown("#### 📞 Registrar gestión")
-        ids_disp = mis_aliados["identificacion"].astype(str).tolist()
 
-        with st.form("form_prog", clear_on_submit=True):
-            c1, c2 = st.columns(2)
-            with c1:
-                ali    = st.selectbox("Cédula del aliado", ids_disp)
-                res    = st.selectbox("Resultado de la llamada", RESULTADOS_PROG)
-            with c2:
-                est    = st.selectbox("Estado aliado", ["-"] + ESTADOS_PROGRAMACION)
-                raz    = st.selectbox("Razón", ["-"] + RAZONES_PROG)
+        # Incluir TODOS (pendientes + ya gestionados) en el select por si quiere registrar
+        todos_ids = pendientes["identificacion"].astype(str).tolist()
+        if not ya_gestionados.empty:
+            todos_ids += ya_gestionados["identificacion"].astype(str).tolist()
 
-            # Ficha del aliado seleccionado
-            fd = mis_aliados[mis_aliados["identificacion"].astype(str) == str(ali)]
-            if not fd.empty:
-                f = fd.iloc[0]
-                st.markdown("**Ficha operativa**")
-                metricas = [c for c in ["nombre","celular","total_cargues","dias_sin_cargar",
-                                         "estado_semaforo","prioridad","fecha_ultimo_cargue"] if c in f.index]
-                cols_m = st.columns(min(len(metricas), 4))
-                for i, cm in enumerate(metricas):
-                    cols_m[i % 4].metric(cm.replace("_"," ").title(), str(f[cm]))
+        if not todos_ids:
+            st.info("✅ Sin aliados pendientes. Todos están al día.")
+        else:
+            with st.form("form_impl", clear_on_submit=True):
+                c1, c2 = st.columns(2)
+                with c1:
+                    ali = st.selectbox("Cédula del aliado", todos_ids)
+                    res = st.selectbox("Resultado de la llamada", RESULTADOS_IMPL)
+                with c2:
+                    est = st.selectbox("Estado", ["-"] + ESTADOS_IMPL)
+                    raz = st.selectbox("Razón", ["-"] + RAZONES_IMPL)
 
-            obs  = st.text_area("Observaciones")
-            sub  = st.form_submit_button("💾 GUARDAR GESTIÓN")
+                # Ficha del aliado
+                fd = mis[mis["identificacion"].astype(str) == str(ali)]
+                if fd.empty:
+                    fd = df[df["identificacion"].astype(str) == str(ali)]
 
-        if sub:
-            er = None if est == "-" else est
-            rr = None if raz == "-" else raz
-            if res == "Sí contestó" and er is None:
-                st.error("Selecciona el estado del aliado.")
-            else:
-                dias_sc = int(fd.iloc[0].get("dias_sin_cargar", 0)) if not fd.empty else 0
-                tc_m    = int(fd.iloc[0].get("total_cargues", 0)) if not fd.empty else 0
-                prox    = calcular_proxima_prog(res, er, dias_sc)
-                guardar_gestion_prog({
-                    "identificacion":        ali,
-                    "analista":              nombre_analista,
-                    "resultado_llamada":     res,
-                    "estado_aliado":         er,
-                    "razon":                 rr,
-                    "observacion":           obs,
-                    "proxima_gestion":       prox,
-                    "total_cargues_momento": tc_m,
-                    "dias_sin_cargar_momento": dias_sc,
-                })
-                st.session_state["prog_hechas"] = st.session_state.get("prog_hechas", 0) + 1
-                st.success(f"✅ Guardado. Próxima gestión: {_safe_str_p(prox)}")
-                st.rerun()
+                if not fd.empty:
+                    f = fd.iloc[0]
+                    st.markdown("**Ficha del aliado**")
+                    ficha_cols = [c for c in ["nombre","celular","total_cargues",
+                                               "cargues_faltantes","prioridad_impl",
+                                               "fecha_ultimo_cargue","estado_impl"] if c in f.index]
+                    cols_f = st.columns(min(len(ficha_cols), 4))
+                    for i, col_n in enumerate(ficha_cols):
+                        cols_f[i % 4].metric(
+                            col_n.replace("_"," ").title(),
+                            str(f[col_n])
+                        )
 
-    # ── BUSCAR ───────────────────────────────
+                    # Aviso si ya fue gestionado hoy
+                    if str(ali) in todos_gestionados_hoy:
+                        st.warning("⚠️ Este aliado ya fue gestionado hoy en otro módulo. Puedes registrar igual si lo estás contactando nuevamente.")
+
+                obs = st.text_area("Observaciones")
+                sub = st.form_submit_button("💾 GUARDAR GESTIÓN")
+
+            if sub:
+                er = None if est == "-" else est
+                rr = None if raz == "-" else raz
+                if res == "Sí contestó" and er is None:
+                    st.error("Selecciona el estado del aliado.")
+                else:
+                    tc_m = int(fd.iloc[0].get("total_cargues", 0)) if not fd.empty else 0
+                    guardar_gestion_impl({
+                        "analista":              nombre_analista,
+                        "identificacion":        ali,
+                        "resultado":             res,
+                        "estado":                er,
+                        "razon":                 rr,
+                        "obs":                   obs,
+                        "total_cargues_momento": tc_m,
+                    })
+                    st.session_state["impl_hechas"] = st.session_state.get("impl_hechas", 0) + 1
+                    if str(er) == "Llegó al 7mo cargue" or tc_m >= CARGUES_META_IMPL:
+                        st.success(f"🏆 ¡{ali} completó los 7 cargues! Pasa a Programación.")
+                    else:
+                        st.success(f"✅ Guardado para {ali}.")
+                    st.rerun()
+
+    # ── BUSCAR ───────────────────────────────────────────────
     with tab_buscar:
-        st.subheader("🔍 Buscar aliado en Programación")
-        cedula_b = st.text_input("Cédula", "", key="prog_buscar_cc")
-        if cedula_b.strip() and pip is not None:
-            fila = pip[pip["identificacion"].astype(str) == cedula_b.strip()]
+        st.subheader("🔍 Buscar aliado")
+        cedula_b = st.text_input("Cédula", "", key="impl_buscar_cc")
+        if cedula_b.strip() and df is not None:
+            fila = df[df["identificacion"].astype(str) == cedula_b.strip()]
             if fila.empty:
-                st.warning(f"No se encontró el aliado {cedula_b} en la base pipeline.")
+                st.warning(f"No se encontró {cedula_b} en la base de Implementación.")
             else:
                 f = fila.iloc[0]
                 st.success("✅ Aliado encontrado")
                 cols_info = [c for c in ["identificacion","nombre","celular","zona","vehiculo",
-                                          "etapa_pipeline","total_cargues","fecha_ultimo_cargue",
-                                          "dias_sin_cargar","estado_semaforo","prioridad",
-                                          "fecha_paso_programacion","analista_asignado"] if c in f.index]
+                                          "total_cargues","cargues_faltantes","fecha_ultimo_cargue",
+                                          "estado_impl","intentos_impl","proxima_gestion_impl",
+                                          "analista_impl"] if c in f.index]
                 c1, c2 = st.columns(2)
                 mid = len(cols_info) // 2
                 with c1:
-                    for col in cols_info[:mid]: st.metric(col.replace("_"," ").title(), str(f[col]))
+                    for col in cols_info[:mid]:
+                        st.metric(col.replace("_"," ").title(), str(f[col]))
                 with c2:
-                    for col in cols_info[mid:]: st.metric(col.replace("_"," ").title(), str(f[col]))
+                    for col in cols_info[mid:]:
+                        st.metric(col.replace("_"," ").title(), str(f[col]))
 
-                # Historial de gestiones del aliado
+                # Historial de este aliado
                 st.markdown("---")
-                if not gest.empty:
-                    h_ali = gest[gest["identificacion"].astype(str) == cedula_b.strip()].copy()
+                if not hist.empty:
+                    h_ali = hist[hist["identificacion"].astype(str) == cedula_b.strip()].copy()
                     if h_ali.empty:
-                        st.info("Sin gestiones en Programación para este aliado.")
+                        st.info("Sin gestiones en Implementación para este aliado.")
                     else:
-                        h_ali["Hora"] = h_ali["fecha_gestion"].dt.strftime("%d/%m/%Y %I:%M %p")
+                        h_ali["Hora"] = h_ali["fecha"].dt.strftime("%d/%m/%Y %I:%M %p")
                         st.dataframe(
-                            h_ali[["Hora","analista","resultado_llamada","estado_aliado","razon","observacion"]].rename(
-                                columns={"analista":"Analista","resultado_llamada":"Resultado",
-                                         "estado_aliado":"Estado","razon":"Razón","observacion":"Obs"}
+                            h_ali[["Hora","analista","resultado","estado","razon","obs","total_cargues_momento"]].rename(
+                                columns={"analista":"Analista","resultado":"Resultado",
+                                         "estado":"Estado","razon":"Razón","obs":"Obs",
+                                         "total_cargues_momento":"Cargues en ese momento"}
                             ), use_container_width=True, hide_index=True
                         )
 
-    # ── MI RENDIMIENTO ───────────────────────
-    with tab_res:
-        st.subheader(f"Mi rendimiento — {nombre_analista.split()[0]}")
-        if gest.empty:
-            st.info("Aún no tienes gestiones en Programación.")
+                # También verificar si aparece en base de llamadas principal
+                try:
+                    from app_gestion_aliados import leer_hoja
+                    hist_prin = leer_hoja("HISTORICO")
+                    if not hist_prin.empty:
+                        hist_prin.columns = hist_prin.columns.str.lower()
+                        h_prin = hist_prin[hist_prin["identificacion"].astype(str) == cedula_b.strip()]
+                        if not h_prin.empty:
+                            st.warning(f"⚠️ Este aliado también tiene {len(h_prin)} gestión(es) en la base de llamadas principal.")
+                except Exception:
+                    pass
+
+    # ── RESUMEN HOY ──────────────────────────────────────────
+    with tab_hoy:
+        st.subheader(f"Mi resumen de hoy — {now_col().strftime('%d/%m/%Y')}")
+        if st.button("🔄 Actualizar", key="impl_ref_analista"):
+            _get_hist_impl(force=True)
+            st.rerun()
+        if hist.empty:
+            st.info("Sin gestiones registradas aún.")
         else:
-            mis_g = gest[gest["analista"] == nombre_analista].copy()
-            if mis_g.empty:
-                st.info("Aún no tienes gestiones registradas.")
+            mh = hist[
+                (hist["analista"] == nombre_analista) &
+                (hist["fecha"].dt.date == now_col().date())
+            ].copy()
+            if mh.empty:
+                st.info("Sin gestiones hoy. ¡Empieza en Mis Aliados!")
             else:
-                t  = len(mis_g)
-                sc = len(mis_g[mis_g["resultado_llamada"] == "Sí contestó"])
-                re = len(mis_g[mis_g["estado_aliado"] == "Reactivado"])
-                nr = len(mis_g[mis_g["resultado_llamada"].isin(["Apagado","Fuera de servicio","No contestó","Número errado"])])
+                t  = len(mh)
+                sc = len(mh[mh["resultado"] == "Sí contestó"])
+                nr = len(mh[mh["resultado"].isin(NO_RESPONDEN_IMPL)])
+                c7 = len(mh[mh["estado"].astype(str).str.contains("7mo cargue", na=False)])
                 c1,c2,c3,c4 = st.columns(4)
-                c1.metric("📞 Total llamadas", t)
-                c2.metric("✅ Contactados",    sc)
-                c3.metric("♻️ Reactivados",    re)
-                c4.metric("📵 No responde",    nr)
-                tend = mis_g.groupby(mis_g["fecha_gestion"].dt.date).size().reset_index(name="gestiones")
-                tend.columns = ["fecha","gestiones"]
-                st.plotly_chart(
-                    px.bar(tend, x="fecha", y="gestiones", title="Mis gestiones por día",
-                           color_discrete_sequence=["#185FA5"]),
-                    use_container_width=True
+                c1.metric("📞 Llamadas",   t)
+                c2.metric("✅ Contactados", sc)
+                c3.metric("📵 No resp.",   nr)
+                c4.metric("🏆 7mo cargue", c7)
+                st.markdown("---")
+                mh["Hora"] = mh["fecha"].dt.strftime("%I:%M %p")
+                st.dataframe(
+                    mh[["Hora","identificacion","resultado","estado","razon","obs"]].rename(
+                        columns={"identificacion":"Cédula","resultado":"Resultado",
+                                 "estado":"Estado","razon":"Razón","obs":"Obs"}
+                    ), use_container_width=True, hide_index=True
+                )
+                st.download_button(
+                    "📥 Descargar hoy",
+                    mh.to_csv(index=False).encode("utf-8"),
+                    f"impl_hoy_{now_col().date()}.csv", "text/csv"
                 )
 
 
-# ─────────────────────────────────────────────
-# INSTRUCCIONES DE INTEGRACIÓN
-# ─────────────────────────────────────────────
-"""
-CÓMO INTEGRAR ESTE MÓDULO EN app_gestion_aliados.py
-=====================================================
+# ─────────────────────────────────────────────────────────────
+# PUNTO DE ENTRADA PRINCIPAL
+# (llamado desde app.py según el perfil)
+# ─────────────────────────────────────────────────────────────
 
-1. IMPORTS — al inicio de app_gestion_aliados.py agregar:
-   from modulo_pipeline import (
-       render_pipeline_coordinador,
-       render_crm_programacion,
-       leer_pipeline,
-       invalidar_pipeline,
-   )
+PASS_IMPL_COORD    = "impl_coord"   # Contraseña coordinador en módulo Impl
+PASS_IMPL_ANALISTA = "impl2024"     # Contraseña analistas de Implementación
 
-2. EN EL BLOQUE COORDINADOR — después de las tabs actuales agregar:
-   st.markdown("---")
-   st.markdown("## 🔭 Pipeline Supplay → Implementación → Programación")
-   render_pipeline_coordinador(NOMBRES_ANALISTAS)
+ANALISTAS_IMPL = [
+    "Analista Impl 1",
+    "Analista Impl 2",
+    "Analista Impl 3",
+    "Analista Impl 4",
+]
 
-3. EN EL BLOQUE ANALISTA — agregar una tab nueva:
-   tab_g, tab_h, tab_his, tab_bus, tab_prog_crm = st.tabs([
-       "📞 Gestión del Día",
-       "📊 Mi Resumen de Hoy",
-       "📅 Mi Histórico",
-       "🔍 Buscar Aliado",
-       "🎯 Programación CRM",   # ← nueva
-   ])
-   with tab_prog_crm:
-       render_crm_programacion(nombre)
+def render_implementacion():
+    """
+    Función principal. Llamar al final de app.py:
 
-4. HOJAS NUEVAS EN GOOGLE SHEETS — crear con estas columnas:
+        from implementacion import render_implementacion
+        if perfil == "Implementación":
+            render_implementacion()
+    """
+    st.markdown("## ⚙️ Módulo Implementación")
+    st.caption("Seguimiento de aliados del 2do al 7mo cargue")
 
-   BASE_PIPELINE:
-   identificacion | nombre | celular | vehiculo | zona | etapa_pipeline |
-   total_cargues | fecha_ultimo_cargue | fecha_entrega_supplay |
-   fecha_entrega_impl | fecha_paso_programacion | dias_sin_cargar |
-   estado_semaforo | prioridad | analista_asignado | estado_programacion |
-   fecha_ultima_gestion | proxima_gestion
+    with st.sidebar:
+        st.markdown("### ⚙️ Implementación")
+        rol_impl = st.selectbox(
+            "Rol en Implementación",
+            ["— Selecciona —", "Coordinador Impl", "Analista Impl"],
+            key="rol_impl_select"
+        )
 
-   GESTIONES_PROGRAMACION:
-   id_gestion | identificacion | analista | fecha_gestion |
-   resultado_llamada | estado_aliado | razon | observacion |
-   proxima_gestion | total_cargues_momento | dias_sin_cargar_momento
+        if rol_impl == "Coordinador Impl":
+            pwd_i = st.text_input("Contraseña coordinador", type="password", key="pwd_impl_coord")
+            if pwd_i != PASS_IMPL_COORD:
+                if pwd_i: st.error("Contraseña incorrecta")
+                st.stop()
+            st.success("✅ Coordinador Implementación")
+            nombre_impl = "Coordinador"
 
-   HISTORIAL_CARGUES:
-   identificacion | fecha_cargue | numero_cargue | etapa_en_momento | zona | vehiculo
+        elif rol_impl == "Analista Impl":
+            nombre_impl = st.selectbox("¿Quién eres?", ANALISTAS_IMPL, key="nom_impl_sel")
+            pwd_a = st.text_input("Contraseña", type="password", key="pwd_impl_ana")
+            if pwd_a != PASS_IMPL_ANALISTA:
+                if pwd_a: st.error("Contraseña incorrecta")
+                st.stop()
+            st.success(f"✅ {nombre_impl.split()[0]}")
+        else:
+            st.info("Selecciona tu rol para continuar.")
+            st.stop()
 
-   KPI_DIARIO:
-   fecha | total_supplay | total_implementacion | total_programacion |
-   total_fidelizados | total_en_riesgo | total_perdidos |
-   conv_supplay_impl | conv_impl_prog | reactivaciones_dia
-
-=====================================================
-"""
+    if nombre_impl == "Coordinador":
+        render_dashboard_implementacion()
+    else:
+        render_crm_analista_impl(nombre_impl)
