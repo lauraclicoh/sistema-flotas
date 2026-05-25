@@ -177,50 +177,6 @@ def _parse_fecha_cargue(serie: pd.Series) -> pd.Series:
         resultados.append(parsed)
     return pd.Series(resultados, index=serie.index)
 
-# ================================================================
-# NUEVO: calcular_estado_aliado
-# KPI principal del sistema — calculado automáticamente
-# Cargando / No ubicable / Deserta
-# ================================================================
-def calcular_estado_aliado(row) -> str:
-    """
-    Determina el estado operativo del aliado a partir de sus datos CRM.
-    - Deserta   : bloqueado permanente o rechazó/empleado/point
-    - No ubicable: no contesta repetidamente (en pausa activa por no contacto)
-    - Cargando  : tiene actividad de cargue reciente (dias > 0 y <= 30)
-    """
-    proxima        = str(row.get("proxima_gestion", "")).strip().upper()
-    ultimo_res     = str(row.get("ultimo_resultado", "")).strip()
-    ultimo_estado  = str(row.get("ultimo_estado", "")).strip()
-    intentos       = 0
-    try: intentos  = int(float(str(row.get("intentos", 0))))
-    except: pass
-    dias           = 0
-    try: dias      = int(float(str(row.get("dias", 0))))
-    except: pass
-
-    # ── Deserta ─────────────────────────────────────────────
-    if proxima == "NO_VOLVER":
-        return "Deserta"
-    if ultimo_estado in NO_VOLVER_ESTADOS:
-        return "Deserta"
-
-    # ── Cargando ─────────────────────────────────────────────
-    # Tiene cargue reciente (último cargue hace 30 días o menos)
-    if 0 < dias <= 30:
-        return "Cargando"
-
-    # ── No ubicable ──────────────────────────────────────────
-    # No contesta en varios intentos y está en pausa activa
-    if ultimo_res in NO_RESPONDEN and intentos >= 3:
-        f_prox = pd.to_datetime(proxima, errors="coerce")
-        if not pd.isna(f_prox) and f_prox > now_col():
-            return "No ubicable"
-
-    # Sin gestión previa o caso borde → No ubicable
-    return "No ubicable"
-
-
 def _get_base():
     if "base_df" not in st.session_state or st.session_state.get("base_stale", True):
         df = leer_hoja("BASE")
@@ -257,8 +213,6 @@ def _get_base():
                 if col not in df.columns: df[col] = 0 if col=="intentos" else ""
             df["intentos"] = pd.to_numeric(df["intentos"], errors="coerce").fillna(0).astype(int)
             df = df.loc[:, ~df.columns.duplicated()]
-            # ── NUEVO: calcular estado_aliado al cargar ──────
-            df["estado_aliado"] = df.apply(calcular_estado_aliado, axis=1)
             st.session_state["base_df"] = df
         st.session_state["base_stale"] = False
     return st.session_state.get("base_df")
@@ -436,18 +390,6 @@ def actualizar_base_crm(identificacion, resultado, estado, razon):
         if updates:
             ws.batch_update(updates)
         _invalidar_base()
-        # ── NUEVO: actualizar estado_aliado en caché local ──
-        if "base_df" in st.session_state and st.session_state["base_df"] is not None:
-            base_local = st.session_state["base_df"]
-            mask = base_local["identificacion"].astype(str) == str(identificacion)
-            if mask.any():
-                base_local.loc[mask, "ultimo_resultado"] = _safe_str(resultado)
-                base_local.loc[mask, "ultimo_estado"]    = _safe_str(estado)
-                base_local.loc[mask, "intentos"]         = intentos_n
-                base_local.loc[mask, "proxima_gestion"]  = _safe_str(proxima)
-                for idx in base_local[mask].index:
-                    base_local.at[idx, "estado_aliado"] = calcular_estado_aliado(base_local.loc[idx])
-                st.session_state["base_df"] = base_local
         fila_base = {
             "identificacion":   str(identificacion),
             "mensajero":        "",
@@ -461,11 +403,11 @@ def actualizar_base_crm(identificacion, resultado, estado, razon):
             "proxima_gestion":  _safe_str(proxima),
             "fecha_gestion":    _safe_str(now_col()),
         }
-        proxima_str  = _safe_str(proxima).upper()
+        proxima_str = _safe_str(proxima).upper()
         es_no_volver = proxima_str == "NO_VOLVER"
-        es_pausa     = False
+        es_pausa = False
         if not es_no_volver:
-            f_prox   = pd.to_datetime(_safe_str(proxima), errors="coerce")
+            f_prox = pd.to_datetime(_safe_str(proxima), errors="coerce")
             es_pausa = not pd.isna(f_prox) and f_prox > now_col()
         if es_no_volver:
             _sincronizar_rechazado(sh, identificacion, fila_base)
@@ -588,8 +530,10 @@ def guardar_reparto(df):
     st.session_state["reparto_stale"] = False
 
 # ================================================================
-# MÓDULO IMPLEMENTACIÓN
+# MÓDULO IMPLEMENTACIÓN — funciones inline
+# (no requiere archivo separado)
 # ================================================================
+
 CARGUES_META_IMPL = 7
 PASS_IMPL_COORD   = "impl_coord"
 PASS_IMPL_ANA     = "impl2024"
@@ -818,15 +762,6 @@ def cargar_base_implementacion(df_nuevo):
     return len(nuevos), len(exist_df), completados
 
 # ================================================================
-# HELPER VISUAL: badge estado_aliado
-# ================================================================
-ESTADO_EMOJI = {"Cargando": "🟢", "No ubicable": "🟡", "Deserta": "🔴"}
-
-def _badge_estado(estado: str) -> str:
-    """Retorna texto con emoji para mostrar en tablas."""
-    return f"{ESTADO_EMOJI.get(estado,'⚪')} {estado}"
-
-# ================================================================
 # UI
 # ================================================================
 st.title("🚚 Gestión Aliados Programación")
@@ -873,7 +808,7 @@ with st.sidebar:
         st.stop()
 
 # ================================================================
-# COORDINADOR
+# COORDINADOR PRINCIPAL
 # ================================================================
 if perfil == "Coordinador":
     base = _get_base()
@@ -1008,10 +943,8 @@ if perfil == "Coordinador":
                 st.warning(f"No se encontró ningún aliado con cédula **{cedula_buscar}**.")
             else:
                 fila_b = resultado_b.iloc[0]; st.success("✅ Aliado encontrado")
-                cols_info = [c for c in ["identificacion","mensajero","celular","correo","zona","municipio",
-                                          "vehiculo","categoria","estado_aliado",
-                                          "dias","intentos","ultimo_resultado","ultimo_estado","proxima_gestion"]
-                             if c in fila_b.index]
+                cols_info = [c for c in ["identificacion","mensajero","celular","correo","zona","municipio","vehiculo","categoria",
+                                          "dias","intentos","ultimo_resultado","ultimo_estado","proxima_gestion"] if c in fila_b.index]
                 c1,c2 = st.columns(2); mitad = len(cols_info)//2
                 with c1:
                     for col in cols_info[:mitad]: st.metric(col.replace("_"," ").title(), str(fila_b[col]))
@@ -1029,69 +962,10 @@ if perfil == "Coordinador":
         elif cedula_buscar.strip() and base is None:
             st.warning("Carga la base primero.")
 
-    # ── TAB 4: ESTADO CRM — NUEVO BLOQUE DE ESTADO_ALIADO ──────────────────
     with tab4:
         if base is None:
             st.warning("Carga la base primero.")
         else:
-            # ── KPI PRINCIPAL: ESTADO ALIADO ─────────────────────────────────
-            st.markdown("### 🎯 Estado Aliado — KPI Principal")
-            n_cargando  = len(base[base["estado_aliado"] == "Cargando"])
-            n_no_ubic   = len(base[base["estado_aliado"] == "No ubicable"])
-            n_deserta   = len(base[base["estado_aliado"] == "Deserta"])
-            total_base  = len(base)
-            pct_carg    = round(n_cargando / max(total_base,1) * 100, 1)
-            pct_noub    = round(n_no_ubic  / max(total_base,1) * 100, 1)
-            pct_des     = round(n_deserta  / max(total_base,1) * 100, 1)
-
-            # Cards grandes con color
-            ea1, ea2, ea3 = st.columns(3)
-            ea1.metric("🟢 Cargando",    f"{n_cargando:,}", f"{pct_carg}% del total")
-            ea2.metric("🟡 No ubicable", f"{n_no_ubic:,}",  f"{pct_noub}% del total")
-            ea3.metric("🔴 Deserta",     f"{n_deserta:,}",  f"{pct_des}% del total", delta_color="inverse")
-
-            # Gráfico de distribución de estado_aliado
-            st.markdown("---")
-            df_estados = base["estado_aliado"].value_counts().reset_index()
-            df_estados.columns = ["Estado", "Aliados"]
-            fig_est = px.bar(
-                df_estados, x="Estado", y="Aliados",
-                color="Estado",
-                color_discrete_map={"Cargando":"#639922","No ubicable":"#BA7517","Deserta":"#A32D2D"},
-                title="Distribución de Estado Aliado en la base completa",
-            )
-            fig_est.update_layout(showlegend=False)
-            st.plotly_chart(fig_est, use_container_width=True)
-
-            # Filtro para ver detalle por estado
-            st.markdown("---")
-            st.markdown("#### Detalle por estado")
-            estado_sel = st.selectbox(
-                "Ver aliados en estado:",
-                ["Todos","🟢 Cargando","🟡 No ubicable","🔴 Deserta"],
-                key="sel_estado_crm"
-            )
-            base_filtrada = base.copy()
-            if "Cargando" in estado_sel:
-                base_filtrada = base[base["estado_aliado"] == "Cargando"]
-            elif "No ubicable" in estado_sel:
-                base_filtrada = base[base["estado_aliado"] == "No ubicable"]
-            elif "Deserta" in estado_sel:
-                base_filtrada = base[base["estado_aliado"] == "Deserta"]
-
-            cols_crm_show = [c for c in ["identificacion","mensajero","celular","zona",
-                                          "vehiculo","dias","intentos","estado_aliado",
-                                          "ultimo_resultado","ultimo_estado","proxima_gestion"]
-                             if c in base_filtrada.columns]
-            base_show = base_filtrada[cols_crm_show].copy()
-            if "estado_aliado" in base_show.columns:
-                base_show["estado_aliado"] = base_show["estado_aliado"].apply(_badge_estado)
-            st.caption(f"Mostrando {len(base_show):,} aliados")
-            st.dataframe(base_show, use_container_width=True, hide_index=True)
-
-            # ── CRM clásico debajo ───────────────────────────────────────────
-            st.markdown("---")
-            st.markdown("#### Vista CRM detallada")
             nv=base[base["proxima_gestion"].astype(str).str.upper()=="NO_VOLVER"]; disp=filtrar_pool(base)
             def en_pausa_fn(v):
                 v=str(v).strip()
@@ -1187,15 +1061,6 @@ if perfil == "Coordinador":
 | No le interesa | ❌ Bloqueo permanente | Nunca |
         """)
         st.info("Reglas automáticas: los aliados en pausa vuelven solos al cumplirse el tiempo.")
-        st.markdown("---")
-        st.markdown("#### 🎯 Lógica de Estado Aliado")
-        st.markdown("""
-| Estado | Condición |
-|---|---|
-| 🟢 **Cargando** | `dias_ultimo_cargue` entre 1 y 30 días |
-| 🟡 **No ubicable** | No contesta (3+ intentos) y está en pausa activa |
-| 🔴 **Deserta** | `proxima_gestion = NO_VOLVER` o estado en lista de bloqueo |
-        """)
 
     with tab8:
         st.subheader("🗺️ Cobertura de Gestión por Zona")
@@ -1259,7 +1124,6 @@ if perfil == "Analista":
         else:
             zonas=sorted(base["zona"].dropna().unique()); vhs=sorted(base["vehiculo_norm"].dropna().unique())
             zona_sel=st.selectbox("Zona",zonas); vh_sel=st.selectbox("Vehículo",vhs)
-
         pool=base[(base["zona"].astype(str)==zona_sel)&(base["vehiculo_norm"].astype(str)==vh_sel)].copy()
         pool=filtrar_pool(pool)
         if pool.empty:
@@ -1269,33 +1133,18 @@ if perfil == "Analista":
         op={"🔴 ALTA":0,"🟡 MEDIA":1,"🟢 BAJA":2}
         pool["_o"]=pool["PRIORIDAD"].map(op).fillna(3)
         pool=pool.sort_values("_o").drop(columns=["_o"]).reset_index(drop=True)
-
         _hist_pool = st.session_state.get("hist_df", pd.DataFrame())
         if not _hist_pool.empty:
             hv = _hist_pool.copy(); hv["fecha"] = pd.to_datetime(hv["fecha"], errors="coerce"); hv = hv.dropna(subset=["fecha"])
             gh = hv[hv["fecha"].dt.date==now_col().date()]["identificacion"].astype(str).tolist()
             pool = pool[~pool["identificacion"].astype(str).isin(gh)]
-
-        # ── NUEVO: filtro por estado_aliado en el pool ───────────────────
-        if "estado_aliado" in pool.columns:
-            estados_pool = ["Todos"] + sorted(pool["estado_aliado"].dropna().unique().tolist())
-            col_cant, col_prio, col_est = st.columns(3)
-            with col_cant: cant=st.number_input("Cantidad de aliados",min_value=10,max_value=300,value=30)
-            with col_prio: fp=st.selectbox("Prioridad",["Todas (ALTA + MEDIA + BAJA)","Solo 🔴 ALTA","Solo 🟡 MEDIA","Solo 🟢 BAJA"])
-            with col_est:
-                est_filtro = st.selectbox("Estado aliado", estados_pool, key="filtro_est_aliado")
-            if est_filtro != "Todos":
-                pool = pool[pool["estado_aliado"] == est_filtro]
-        else:
-            c1,c2=st.columns(2)
-            with c1: cant=st.number_input("Cantidad de aliados",min_value=10,max_value=300,value=30)
-            with c2: fp=st.selectbox("Prioridad",["Todas (ALTA + MEDIA + BAJA)","Solo 🔴 ALTA","Solo 🟡 MEDIA","Solo 🟢 BAJA"])
-
+        c1,c2=st.columns(2)
+        with c1: cant=st.number_input("Cantidad de aliados",min_value=10,max_value=300,value=30)
+        with c2: fp=st.selectbox("Prioridad",["Todas (ALTA + MEDIA + BAJA)","Solo 🔴 ALTA","Solo 🟡 MEDIA","Solo 🟢 BAJA"])
         if fp=="Solo 🔴 ALTA":    pool=pool[pool["PRIORIDAD"]=="🔴 ALTA"]
         elif fp=="Solo 🟡 MEDIA": pool=pool[pool["PRIORIDAD"]=="🟡 MEDIA"]
         elif fp=="Solo 🟢 BAJA":  pool=pool[pool["PRIORIDAD"]=="🟢 BAJA"]
         st.caption(f"Disponibles en este filtro: **{len(pool)}**")
-
         if st.button("🚀 Generar mis llamadas"):
             hoy_s=now_col().date().isoformat(); rep=cargar_reparto()
             if not rep.empty and "fecha" in rep.columns:
@@ -1312,7 +1161,6 @@ if perfil == "Analista":
                 guardar_reparto(pd.concat([rep,nf],ignore_index=True))
                 st.session_state["pool_activo"]=bloque; st.session_state["hechas"]=0
                 st.success(f"✅ {len(bloque)} aliados asignados."); st.rerun()
-
         hoy_s=now_col().date().isoformat(); rep_act=cargar_reparto(); mis_ids=[]
         if not rep_act.empty and "fecha" in rep_act.columns and "analista" in rep_act.columns:
             mis_ids=rep_act[(rep_act["fecha"]==hoy_s)&(rep_act["analista"]==nombre)]["identificacion"].astype(str).tolist()
@@ -1321,22 +1169,15 @@ if perfil == "Analista":
             hv2=hist_fresco.copy(); hv2["fecha"]=pd.to_datetime(hv2["fecha"],errors="coerce"); hv2=hv2.dropna(subset=["fecha"])
             gh2=hv2[hv2["fecha"].dt.date==now_col().date()]["identificacion"].astype(str).tolist()
             mis_ids=[i for i in mis_ids if i not in gh2]
-
         if mis_ids:
             hechas=st.session_state.get("hechas",0); rest=len(mis_ids)
             pct=int(hechas/(hechas+rest)*100) if (hechas+rest)>0 else 0
             st.progress(pct,text=f"Progreso: {hechas} gestionados / {rest} pendientes")
             mis_datos=base[base["identificacion"].astype(str).isin(mis_ids)].copy()
             if "PRIORIDAD" not in mis_datos.columns: mis_datos["PRIORIDAD"]=mis_datos["dias"].apply(_prio)
-            # ── NUEVO: incluir estado_aliado en la tabla de pendientes ───────
-            cols_v=[c for c in ["identificacion","mensajero","celular","zona","vehiculo",
-                                  "dias","intentos","estado_aliado","PRIORIDAD"]
-                    if c in mis_datos.columns]
+            cols_v=[c for c in ["identificacion","mensajero","celular","zona","vehiculo","dias","intentos","PRIORIDAD"] if c in mis_datos.columns]
             st.markdown(f"#### 📋 Pendientes ({rest})")
-            mis_datos_show = mis_datos[cols_v].copy()
-            if "estado_aliado" in mis_datos_show.columns:
-                mis_datos_show["estado_aliado"] = mis_datos_show["estado_aliado"].apply(_badge_estado)
-            st.dataframe(mis_datos_show, use_container_width=True, hide_index=True)
+            st.dataframe(mis_datos[cols_v],use_container_width=True,hide_index=True)
             st.markdown("---"); st.markdown("#### 📞 Registrar gestión")
             with st.form("form_g",clear_on_submit=True):
                 c1,c2=st.columns(2)
@@ -1344,9 +1185,9 @@ if perfil == "Analista":
                 with c2: est=st.selectbox("Estado final (si contestó)",["-"]+ESTADOS_FINALES); raz=st.selectbox("Razón (si contestó)",["-"]+RAZONES)
                 fd=mis_datos[mis_datos["identificacion"].astype(str)==str(ali)]
                 if not fd.empty:
-                    f=fd.iloc[0]; ic=[c for c in ["mensajero","celular","intentos","estado_aliado","PRIORIDAD"] if c in f.index]
+                    f=fd.iloc[0]; ic=[c for c in ["mensajero","celular","intentos","PRIORIDAD"] if c in f.index]
                     ci=st.columns(max(len(ic),1))
-                    for i,cn in enumerate(ic): ci[i].metric(cn.replace("_"," ").capitalize(),str(f[cn]))
+                    for i,cn in enumerate(ic): ci[i].metric(cn.capitalize(),str(f[cn]))
                 obs=st.text_area("Observaciones"); sub=st.form_submit_button("💾 GUARDAR GESTIÓN")
             if sub:
                 er=None if est=="-" else est; rr=None if raz=="-" else raz
@@ -1433,10 +1274,8 @@ if perfil == "Analista":
                 st.warning(f"No se encontró ningún aliado con cédula **{cedula_bus}**.")
             else:
                 fila_b = res_b.iloc[0]; st.success("✅ Aliado encontrado")
-                cols_info = [c for c in ["identificacion","mensajero","celular","zona","municipio",
-                                          "vehiculo","categoria","estado_aliado",
-                                          "dias","intentos","ultimo_resultado","ultimo_estado","proxima_gestion"]
-                             if c in fila_b.index]
+                cols_info = [c for c in ["identificacion","mensajero","celular","zona","municipio","vehiculo","categoria",
+                                          "dias","intentos","ultimo_resultado","ultimo_estado","proxima_gestion"] if c in fila_b.index]
                 c1, c2 = st.columns(2); mitad = len(cols_info) // 2
                 with c1:
                     for col in cols_info[:mitad]: st.metric(col.replace("_"," ").title(), str(fila_b[col]))
@@ -1485,11 +1324,16 @@ if perfil == "Implementación":
     st.caption("Seguimiento de aliados del 2do al 7mo cargue")
 
     if nombre == "CoordImpl":
+        # ── COORDINADOR IMPLEMENTACIÓN ──────────────────────
         df_impl = _get_impl()
         hist_impl = _get_hist_impl()
+
         tab_res, tab_kpi, tab_carga_impl = st.tabs([
-            "📊 Resumen Implementación","📈 KPIs y análisis","📤 Cargar base",
+            "📊 Resumen Implementación",
+            "📈 KPIs y análisis",
+            "📤 Cargar base",
         ])
+
         with tab_res:
             st.subheader("Resumen — Implementación")
             if st.button("🔄 Actualizar", key="impl_ref_coord"):
@@ -1519,6 +1363,7 @@ if perfil == "Implementación":
                     cols_l=[c for c in ["identificacion","nombre","celular","zona","vehiculo_norm","total_cargues"] if c in listos.columns]
                     st.dataframe(listos[cols_l],use_container_width=True,hide_index=True)
                     st.download_button("📥 Descargar listos para Programación",listos.to_csv(index=False).encode("utf-8"),"listos_programacion.csv","text/csv")
+
         with tab_kpi:
             st.subheader("KPIs Implementación")
             if df_impl is None:
@@ -1549,6 +1394,7 @@ if perfil == "Implementación":
                     if not abd.empty:
                         rz=abd["razon"].value_counts().reset_index(); rz.columns=["Razón","Cantidad"]
                         st.dataframe(rz,use_container_width=True,hide_index=True)
+
         with tab_carga_impl:
             st.subheader("📤 Cargar base de Implementación")
             st.info("**Columnas esperadas:** `identificacion`, `nombre`, `celular`, `vehiculo`, `zona`, `total_cargues`, `fecha_ultimo_cargue`")
@@ -1564,22 +1410,31 @@ if perfil == "Implementación":
                         st.success(f"✅ {nn} nuevos · {na} actualizados · {nc} ya completaron 7 cargues")
                 except Exception as e:
                     st.error(f"Error: {e}")
+
     else:
+        # ── ANALISTA IMPLEMENTACIÓN ─────────────────────────
         df_impl  = _get_impl()
         hist_impl = _get_hist_impl()
+
         if df_impl is None:
             st.warning("La base de Implementación no está cargada todavía.")
             st.stop()
+
         tab_mis_impl, tab_buscar_impl, tab_hoy_impl = st.tabs([
-            "📞 Mis aliados — Implementación","🔍 Buscar aliado","📊 Mi resumen de hoy",
+            "📞 Mis aliados — Implementación",
+            "🔍 Buscar aliado",
+            "📊 Mi resumen de hoy",
         ])
+
         with tab_mis_impl:
             if "analista_impl" in df_impl.columns:
                 mis = df_impl[df_impl["analista_impl"].astype(str) == nombre].copy()
             else:
                 mis = df_impl.copy()
+
             mis = mis[~mis.get("estado_impl", pd.Series(dtype=str)).astype(str).str.contains("Completó|Abandona", na=False)]
             mis = mis[mis.get("proxima_gestion_impl", pd.Series(dtype=str)).astype(str).str.upper() != "NO_VOLVER"]
+
             def disp_impl(v):
                 v = str(v).strip()
                 if v in ("","nan","None","0","NO_VOLVER"): return True
@@ -1587,32 +1442,40 @@ if perfil == "Implementación":
                 return pd.isna(f) or f <= now_col()
             if "proxima_gestion_impl" in mis.columns:
                 mis = mis[mis["proxima_gestion_impl"].apply(disp_impl)]
+
             gestionados_hoy = _get_gestionados_hoy_todos()
             if not hist_impl.empty:
                 hh = hist_impl.copy(); hh["fecha"] = pd.to_datetime(hh["fecha"], errors="coerce"); hh = hh.dropna(subset=["fecha"])
                 ya_impl_hoy = set(hh[hh["fecha"].dt.date == now_col().date()]["identificacion"].astype(str).tolist())
                 gestionados_hoy = gestionados_hoy | ya_impl_hoy
+
             mis["_ya_hoy"] = mis["identificacion"].astype(str).isin(gestionados_hoy)
             pendientes     = mis[~mis["_ya_hoy"]].copy()
             ya_gestionados = mis[mis["_ya_hoy"]].copy()
+
             orden = {"🔴 ALTA":0,"🟡 MEDIA":1,"🟢 BAJA":2}
             pendientes["_ord"] = pendientes["prioridad_impl"].map(orden).fillna(3)
             pendientes = pendientes.sort_values("_ord").drop(columns=["_ord","_ya_hoy"]).reset_index(drop=True)
+
             hechas_impl = st.session_state.get("impl_hechas", 0)
             pend_n = len(pendientes)
             pct_impl = int(hechas_impl / max(hechas_impl + pend_n, 1) * 100)
             st.progress(pct_impl, text=f"Progreso: {hechas_impl} gestionados · {pend_n} pendientes")
+
             if not ya_gestionados.empty:
                 with st.expander(f"⚠️ {len(ya_gestionados)} aliados ya gestionados hoy en otro módulo — puedes gestionarlos igual"):
                     cols_dup=[c for c in ["identificacion","nombre","celular","total_cargues","prioridad_impl"] if c in ya_gestionados.columns]
                     st.dataframe(ya_gestionados[cols_dup],use_container_width=True,hide_index=True)
+
             cols_v=[c for c in ["identificacion","nombre","celular","zona","vehiculo_norm","total_cargues","cargues_faltantes","prioridad_impl","estado_impl"] if c in pendientes.columns]
             st.markdown(f"#### Pendientes ({pend_n})")
             st.dataframe(pendientes[cols_v],use_container_width=True,hide_index=True)
+
             st.markdown("---"); st.markdown("#### 📞 Registrar gestión")
             todos_ids = pendientes["identificacion"].astype(str).tolist()
             if not ya_gestionados.empty:
                 todos_ids += ya_gestionados["identificacion"].astype(str).tolist()
+
             if not todos_ids:
                 st.info("✅ Sin aliados pendientes.")
             else:
@@ -1644,6 +1507,7 @@ if perfil == "Implementación":
                         else:
                             st.success(f"✅ Guardado para {ali_i}.")
                         st.rerun()
+
         with tab_buscar_impl:
             st.subheader("🔍 Buscar aliado en Implementación")
             cedula_bi = st.text_input("Cédula", "", key="impl_buscar_cc")
@@ -1669,6 +1533,7 @@ if perfil == "Implementación":
                             h_bi["Hora"]=h_bi["fecha"].dt.strftime("%d/%m/%Y %I:%M %p")
                             st.dataframe(h_bi[["Hora","analista","resultado","estado","razon","obs","total_cargues_momento"]].rename(
                                 columns={"analista":"Analista","resultado":"Resultado","estado":"Estado","razon":"Razón","obs":"Obs","total_cargues_momento":"Cargues"}),use_container_width=True,hide_index=True)
+
         with tab_hoy_impl:
             st.subheader(f"Mi resumen de hoy — {now_col().strftime('%d/%m/%Y')}")
             if st.button("🔄 Actualizar",key="impl_ref_analista"):
