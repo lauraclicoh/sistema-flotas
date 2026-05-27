@@ -640,12 +640,36 @@ def _get_impl(force=False):
             st.session_state["impl_df"] = None
         else:
             df.columns = df.columns.str.strip().str.lower()
-            df["vehiculo_norm"] = df["vehiculo"].apply(_norm_vh) if "vehiculo" in df.columns else "Sin vehículo"
-            df["total_cargues"] = pd.to_numeric(df.get("total_cargues", 0), errors="coerce").fillna(0).astype(int)
-            df["intentos_impl"] = pd.to_numeric(df.get("intentos_impl", 0), errors="coerce").fillna(0).astype(int)
+
+            # FIX zona: alias múltiples
+            if "zona" not in df.columns:
+                for alias_z in ["municipio","ciudad","city"]:
+                    if alias_z in df.columns:
+                        df["zona"] = df[alias_z]; break
+            if "zona" not in df.columns:
+                df["zona"] = "Sin zona"
+
+            # FIX vehiculo: alias múltiples
+            vh_col = next((c for c in ["vehiculo","tipo_vehiculo","vehicle","tipo_vh"] if c in df.columns), None)
+            df["vehiculo_norm"] = df[vh_col].apply(_norm_vh) if vh_col else "Sin vehículo"
+
+            # FIX total_cargues: alias múltiples
+            tc_col = next((c for c in ["total_cargues","cargues","num_cargues","cargues_totales"] if c in df.columns), None)
+            if tc_col:
+                df["total_cargues"] = pd.to_numeric(df[tc_col], errors="coerce").fillna(0).astype(int)
+            else:
+                df["total_cargues"] = 0
+
+            df["intentos_impl"]    = pd.to_numeric(df.get("intentos_impl", pd.Series(0, index=df.index)), errors="coerce").fillna(0).astype(int)
             df["cargues_faltantes"] = (CARGUES_META_IMPL - df["total_cargues"]).clip(lower=0)
             df["prioridad_impl"]    = df["total_cargues"].apply(_prio_impl)
-            if "zona" not in df.columns: df["zona"] = "Sin zona"
+
+            # FIX: asegurar columna identificacion
+            if "identificacion" not in df.columns:
+                for alias_id in ["cedula","id_aliado","id","documento"]:
+                    if alias_id in df.columns:
+                        df["identificacion"] = df[alias_id]; break
+
             st.session_state["impl_df"] = df
         st.session_state["impl_last_load"] = ahora
     return st.session_state.get("impl_df")
@@ -764,55 +788,124 @@ def _actualizar_crm_impl(identificacion, resultado, estado, razon, total_cargues
     except Exception as e:
         st.warning(f"CRM Implementación no actualizado: {e}")
 
-def cargar_base_implementacion(df_nuevo):
+def cargar_base_implementacion(df_nuevo, modo="incremental"):
+    """
+    Carga base de Implementación.
+    modo='incremental': conserva CRM de existentes, agrega nuevos.
+    modo='reemplazar': borra todo y sube desde cero.
+    """
     df_nuevo = df_nuevo.copy()
+    # Normalizar columnas
     df_nuevo.columns = (df_nuevo.columns.str.strip().str.lower()
                         .str.replace(r"\s+","_",regex=True))
-    df_nuevo = df_nuevo[[c for c in df_nuevo.columns if c and not c.startswith("unnamed")]]
+    df_nuevo = df_nuevo[[c for c in df_nuevo.columns
+                          if c and not c.startswith("unnamed") and c != "_"]]
     df_nuevo = df_nuevo.loc[:, ~df_nuevo.columns.duplicated()]
-    ALIAS_ID = ["identificacion","id_aliado","cedula","id","documento"]
-    col_id   = next((a for a in ALIAS_ID if a in df_nuevo.columns), None)
+
+    # Detectar columna ID con alias ampliados
+    ALIAS_ID = ["identificacion","id_aliado","id_aliado","cedula","id","documento",
+                "nro_identificacion","numero_identificacion"]
+    col_id = next((a for a in ALIAS_ID if a in df_nuevo.columns), None)
     if not col_id:
-        st.error(f"No se encontró columna de ID. Columnas: {list(df_nuevo.columns)}")
+        st.error(f"No se encontró columna de ID. Columnas detectadas: {list(df_nuevo.columns)}")
         return 0, 0, 0
+
     df_nuevo = df_nuevo.rename(columns={col_id: "identificacion"})
-    df_nuevo["identificacion"] = df_nuevo["identificacion"].astype(str).str.strip()
-    base = leer_hoja("BASE_IMPLEMENTACION")
+    # Convertir todo a string seguro antes de subir
+    df_nuevo = _df_safe_str(df_nuevo)
+    df_nuevo["identificacion"] = df_nuevo["identificacion"].str.strip()
+    df_nuevo = df_nuevo.fillna("")
+
     CRM_COLS = ["estado_impl","analista_impl","intentos_impl","proxima_gestion_impl",
                 "ultimo_resultado_impl","ultimo_estado_impl","ultima_razon_impl","fecha_ingreso_impl"]
-    if base.empty:
+
+    # ── Modo REEMPLAZAR ──────────────────────────────────────────────────────
+    if modo == "reemplazar":
         for col in CRM_COLS:
             if col not in df_nuevo.columns:
                 df_nuevo[col] = "0" if col == "intentos_impl" else ""
         df_nuevo["fecha_ingreso_impl"] = _safe_str(now_col())
+        df_nuevo = df_nuevo.fillna("")
         reemplazar_hoja("BASE_IMPLEMENTACION", df_nuevo)
         if "impl_df" in st.session_state: del st.session_state["impl_df"]
         return len(df_nuevo), 0, 0
-    base.columns = (base.columns.str.strip().str.lower().str.replace(r"\s+","_",regex=True))
-    base["identificacion"] = base["identificacion"].astype(str).str.strip()
-    if "total_cargues" not in base.columns: base["total_cargues"] = 0
-    base["total_cargues"] = pd.to_numeric(base["total_cargues"], errors="coerce").fillna(0).astype(int)
+
+    # ── Modo INCREMENTAL ─────────────────────────────────────────────────────
+    base = leer_hoja("BASE_IMPLEMENTACION")
+
+    if base.empty:
+        # Primera carga
+        for col in CRM_COLS:
+            if col not in df_nuevo.columns:
+                df_nuevo[col] = "0" if col == "intentos_impl" else ""
+        df_nuevo["fecha_ingreso_impl"] = _safe_str(now_col())
+        df_nuevo = df_nuevo.fillna("")
+        reemplazar_hoja("BASE_IMPLEMENTACION", df_nuevo)
+        if "impl_df" in st.session_state: del st.session_state["impl_df"]
+        return len(df_nuevo), 0, 0
+
+    # Normalizar base guardada
+    base.columns = (base.columns.str.strip().str.lower()
+                    .str.replace(r"\s+","_",regex=True))
+    base = base.loc[:, ~base.columns.duplicated()]
+    # Alias de ID en base guardada
+    if "identificacion" not in base.columns:
+        col_id_b = next((a for a in ALIAS_ID if a in base.columns), None)
+        if col_id_b:
+            base = base.rename(columns={col_id_b: "identificacion"})
+        else:
+            st.error("BASE_IMPLEMENTACION no tiene columna de identificación.")
+            return 0, 0, 0
+    base = _df_safe_str(base)
+    base["identificacion"] = base["identificacion"].str.strip()
+    base = base.fillna("")
+
+    # total_cargues numérico para contar completados
+    if "total_cargues" not in base.columns:
+        base["total_cargues"] = "0"
+
     ids_existentes = set(base["identificacion"].unique())
+
+    # Nuevos registros
     nuevos = df_nuevo[~df_nuevo["identificacion"].isin(ids_existentes)].copy()
     for col in CRM_COLS:
         if col not in nuevos.columns:
             nuevos[col] = "0" if col == "intentos_impl" else ""
     nuevos["fecha_ingreso_impl"] = _safe_str(now_col())
-    cols_op  = [c for c in df_nuevo.columns if c not in CRM_COLS and c != "identificacion"]
-    exist_df = (df_nuevo[df_nuevo["identificacion"].isin(ids_existentes)][["identificacion"]+cols_op]
-                .loc[:, ~pd.Index(["identificacion"]+cols_op).duplicated()]
+    nuevos = nuevos.fillna("")
+
+    # Actualizar existentes — SOLO columnas operativas (no CRM)
+    cols_op = [c for c in df_nuevo.columns if c not in CRM_COLS and c != "identificacion"]
+    existentes_mask = df_nuevo["identificacion"].isin(ids_existentes)
+    cols_sel = ["identificacion"] + cols_op
+    exist_df = (df_nuevo[existentes_mask][cols_sel]
+                .loc[:, ~pd.Index(cols_sel).duplicated()]
                 .set_index("identificacion"))
+
     base_idx = base.set_index("identificacion")
     for col in cols_op:
         if col not in exist_df.columns: continue
         col_data = exist_df[[col]]
-        if col in base_idx.columns: base_idx.update(col_data)
-        else: base_idx = base_idx.join(col_data, how="left")
-    completados = int((pd.to_numeric(base_idx.get("total_cargues", pd.Series(dtype=float)),
-                                     errors="coerce").fillna(0) >= CARGUES_META_IMPL).sum())
-    base_act  = base_idx.reset_index()
-    base_final = pd.concat([base_act, nuevos], ignore_index=True).fillna("")
+        if col in base_idx.columns:
+            base_idx.update(col_data)
+        else:
+            base_idx = base_idx.join(col_data, how="left")
+
+    # Contar completados
+    tc_serie = pd.to_numeric(
+        base_idx.get("total_cargues", pd.Series(dtype=str)),
+        errors="coerce"
+    ).fillna(0)
+    completados = int((tc_serie >= CARGUES_META_IMPL).sum())
+
+    base_actualizada = base_idx.reset_index()
+    base_final = pd.concat([base_actualizada, nuevos], ignore_index=True)
+    base_final = base_final.fillna("")
     base_final = base_final.loc[:, ~base_final.columns.duplicated()]
+
+    # Última conversión segura antes de subir
+    base_final = _df_safe_str(base_final)
+
     reemplazar_hoja("BASE_IMPLEMENTACION", base_final)
     if "impl_df" in st.session_state: del st.session_state["impl_df"]
     return len(nuevos), len(exist_df), completados
@@ -980,10 +1073,14 @@ if perfil == "Coordinador":
                 st.download_button("📥 Descargar (CSV)",d_show.to_csv(index=False).encode("utf-8"),f"historico_{f1}_{f2}.csv","text/csv")
 
     with tab3:
-        st.subheader("🔍 Buscar Aliado por Cédula")
-        cedula_buscar = st.text_input("Ingresa la cédula del aliado", "", key="busq_cedula")
+        st.subheader("🔍 Buscar Aliado por Cédula o Teléfono")
+        cedula_buscar = st.text_input("Ingresa la cédula o teléfono", "", key="busq_cedula")
         if cedula_buscar.strip() and base is not None:
-            resultado_b = base[base["identificacion"].astype(str)==cedula_buscar.strip()]
+            termino_c = cedula_buscar.strip()
+            resultado_b = base[base["identificacion"].astype(str) == termino_c]
+            if resultado_b.empty and "celular" in base.columns:
+                resultado_b = base[base["celular"].astype(str).str.replace(r"\D","",regex=True) ==
+                                   termino_c.replace(" ","")]
             if resultado_b.empty:
                 st.warning(f"No se encontró ningún aliado con cédula **{cedula_buscar}**.")
             else:
@@ -1238,28 +1335,84 @@ if perfil == "Coordinador":
             if df_impl_c is None:
                 st.warning("Carga la base de Implementación primero (pestaña 📤 Cargar base).")
             else:
-                activos_c     = df_impl_c[~df_impl_c.get("estado_impl", pd.Series(dtype=str)).astype(str).str.contains("Abandona|Completó", na=False)]
-                completados_c = df_impl_c[df_impl_c.get("estado_impl", pd.Series(dtype=str)).astype(str).str.contains("Completó", na=False)]
+                # Segmentar la base
+                completados_c = df_impl_c[df_impl_c["total_cargues"] >= CARGUES_META_IMPL]
                 abandonaron_c = df_impl_c[df_impl_c.get("estado_impl", pd.Series(dtype=str)).astype(str).str.contains("Abandona", na=False)]
+                sin_contacto_c = df_impl_c[
+                    df_impl_c.get("ultimo_resultado_impl", pd.Series(dtype=str)).astype(str).isin(NO_RESP_IMPL) &
+                    (df_impl_c.get("intentos_impl", pd.Series(0, index=df_impl_c.index)).astype(int) >= 3)
+                ] if "ultimo_resultado_impl" in df_impl_c.columns else df_impl_c.iloc[0:0]
+                activos_c = df_impl_c[
+                    ~df_impl_c.index.isin(completados_c.index) &
+                    ~df_impl_c.index.isin(abandonaron_c.index)
+                ]
+                total_impl = len(df_impl_c)
+                pct_grad   = round(len(completados_c)/max(total_impl,1)*100,1)
+                pct_churn  = round(len(abandonaron_c)/max(total_impl,1)*100,1)
+                pct_noresp = round(len(sin_contacto_c)/max(total_impl,1)*100,1)
 
-                ci1,ci2,ci3,ci4 = st.columns(4)
-                ci1.metric("📦 Total base", len(df_impl_c))
-                ci2.metric("🔄 Activos en seguimiento", len(activos_c))
-                ci3.metric("🏆 Completaron 7 cargues", len(completados_c),
-                           delta=f"{round(len(completados_c)/max(len(df_impl_c),1)*100,1)}%")
-                ci4.metric("🔴 Abandonaron", len(abandonaron_c),
-                           delta=f"-{round(len(abandonaron_c)/max(len(df_impl_c),1)*100,1)}%")
+                # ── KPIs estilo dashboard adjunto ─────────────────────────
+                st.markdown("---")
+                st.markdown("##### Seguimiento Implementación")
+                kc1,kc2,kc3,kc4,kc5 = st.columns(5)
+                kc1.metric("👥 Total Drivers",  f"{total_impl}")
+                kc2.metric("🔄 En Implementación", f"{len(activos_c)}", "Activos")
+                kc3.metric(f"🎓 % Graduación (≥R{CARGUES_META_IMPL})",
+                           f"{pct_grad}%", f"{len(completados_c)} Drivers")
+                kc4.metric("🔴 % Churn Total",
+                           f"{pct_churn}%", f"-{len(abandonaron_c)} Drivers", delta_color="inverse")
+                kc5.metric("📵 No contesta / Sin resp.",
+                           f"{pct_noresp}%", f"{len(sin_contacto_c)} Drivers", delta_color="inverse")
 
                 st.markdown("---")
-                st.markdown("#### Distribución por cargues")
-                hist_c_c = df_impl_c["total_cargues"].value_counts().sort_index().reset_index()
-                hist_c_c.columns = ["Cargues","Aliados"]
-                fig_ic = px.bar(hist_c_c, x="Cargues", y="Aliados",
-                                title="¿En qué cargue están los aliados de Implementación?",
-                                color_discrete_sequence=["#534AB7"])
-                st.plotly_chart(fig_ic, use_container_width=True)
 
-                # Alta prioridad
+                # ── Funnel R1→R7 + Barras de conversión ───────────────────
+                col_funnel, col_barras = st.columns(2)
+
+                with col_funnel:
+                    st.markdown("##### Funnel de retención R1 → R7")
+                    # Contar aliados por cargue acumulado
+                    funnel_data = []
+                    for r in range(1, CARGUES_META_IMPL + 1):
+                        n = len(df_impl_c[df_impl_c["total_cargues"] >= r])
+                        funnel_data.append({"Ruta": f"R{r}", "Aliados": n})
+                    df_funnel = pd.DataFrame(funnel_data)
+                    fig_funnel = px.bar(
+                        df_funnel, x="Ruta", y="Aliados",
+                        text="Aliados",
+                        color="Ruta",
+                        color_discrete_sequence=["#1565C0","#1976D2","#42A5F5","#64B5F6","#90CAF9","#BBDEFB","#E3F2FD"][:CARGUES_META_IMPL],
+                        title=f"Funnel retención R1 → R{CARGUES_META_IMPL}"
+                    )
+                    fig_funnel.update_traces(textposition="outside")
+                    fig_funnel.update_layout(showlegend=False, plot_bgcolor="#f8f9fa",
+                                             paper_bgcolor="#f8f9fa", font_color="#333")
+                    st.plotly_chart(fig_funnel, use_container_width=True)
+
+                with col_barras:
+                    st.markdown("##### % Churn por tramo (abandono entre rutas)")
+                    churn_data = []
+                    for r in range(1, CARGUES_META_IMPL):
+                        n_ini = len(df_impl_c[df_impl_c["total_cargues"] >= r])
+                        n_sig = len(df_impl_c[df_impl_c["total_cargues"] >= r + 1])
+                        pct_ch = round((1 - n_sig/max(n_ini,1))*100, 2) if n_ini > 0 else 0
+                        churn_data.append({"Tramo": f"R{r}→R{r+1}", "% Churn": pct_ch})
+                    df_churn = pd.DataFrame(churn_data)
+                    CHURN_COLORS = ["#C62828","#E53935","#EF9A9A","#FFCC02","#66BB6A"]
+                    fig_churn = px.bar(
+                        df_churn, x="Tramo", y="% Churn",
+                        text="% Churn",
+                        color="Tramo",
+                        color_discrete_sequence=CHURN_COLORS * 3,
+                        title="% Abandono por tramo de ruta"
+                    )
+                    fig_churn.update_traces(texttemplate="%{text:.2f}%", textposition="outside")
+                    fig_churn.update_layout(showlegend=False, plot_bgcolor="#f8f9fa",
+                                            paper_bgcolor="#f8f9fa", font_color="#333",
+                                            yaxis_ticksuffix="%")
+                    st.plotly_chart(fig_churn, use_container_width=True)
+
+                # ── Alta prioridad ─────────────────────────────────────────
                 alta_c = df_impl_c[df_impl_c["prioridad_impl"] == "🔴 ALTA"].copy()
                 if not alta_c.empty:
                     st.markdown("---")
@@ -1269,11 +1422,11 @@ if perfil == "Coordinador":
                                if c in alta_c.columns]
                     st.dataframe(alta_c[cols_ac], use_container_width=True, hide_index=True)
 
-                # Listos para Programación
-                listos_c = df_impl_c[df_impl_c["total_cargues"] >= CARGUES_META_IMPL].copy()
+                # ── Listos para Programación ───────────────────────────────
+                listos_c = completados_c.copy()
                 if not listos_c.empty:
                     st.markdown("---")
-                    st.markdown(f"#### ✅ {len(listos_c)} aliados con 7 cargues — listos para Programación")
+                    st.markdown(f"#### ✅ {len(listos_c)} aliados con {CARGUES_META_IMPL} cargues — listos para Programación")
                     cols_lc = [c for c in ["identificacion","nombre","celular","zona","vehiculo_norm","total_cargues"]
                                if c in listos_c.columns]
                     st.dataframe(listos_c[cols_lc], use_container_width=True, hide_index=True)
@@ -1281,20 +1434,38 @@ if perfil == "Coordinador":
                                        listos_c.to_csv(index=False).encode("utf-8"),
                                        "listos_programacion.csv", "text/csv")
 
-                # Tabla completa filtrable
+                # ── Tabla completa filtrable ───────────────────────────────
                 st.markdown("---")
                 st.markdown("#### 📋 Base completa Implementación")
-                est_fil_c = st.selectbox("Filtrar por estado impl",
-                                         ["Todos"] + sorted(df_impl_c.get("estado_impl", pd.Series(dtype=str)).dropna().unique().tolist()),
-                                         key="est_fil_impl_coord")
-                df_impl_show = df_impl_c if est_fil_c == "Todos" else df_impl_c[df_impl_c["estado_impl"].astype(str)==est_fil_c]
+                col_fe1, col_fe2, col_fe3 = st.columns(3)
+                with col_fe1:
+                    est_fil_c = st.selectbox(
+                        "Estado impl",
+                        ["Todos"] + sorted(df_impl_c.get("estado_impl", pd.Series(dtype=str)).dropna().unique().tolist()),
+                        key="est_fil_impl_coord"
+                    )
+                with col_fe2:
+                    zonas_impl = ["Todas"] + sorted(df_impl_c["zona"].dropna().unique().tolist()) if "zona" in df_impl_c.columns else ["Todas"]
+                    zona_fil_c = st.selectbox("Zona", zonas_impl, key="zona_fil_impl_coord")
+                with col_fe3:
+                    vhs_impl = ["Todos"] + sorted(df_impl_c["vehiculo_norm"].dropna().unique().tolist()) if "vehiculo_norm" in df_impl_c.columns else ["Todos"]
+                    vh_fil_c = st.selectbox("Vehículo", vhs_impl, key="vh_fil_impl_coord")
+
+                df_impl_show = df_impl_c.copy()
+                if est_fil_c != "Todos":
+                    df_impl_show = df_impl_show[df_impl_show["estado_impl"].astype(str) == est_fil_c]
+                if zona_fil_c != "Todas" and "zona" in df_impl_show.columns:
+                    df_impl_show = df_impl_show[df_impl_show["zona"].astype(str) == zona_fil_c]
+                if vh_fil_c != "Todos" and "vehiculo_norm" in df_impl_show.columns:
+                    df_impl_show = df_impl_show[df_impl_show["vehiculo_norm"].astype(str) == vh_fil_c]
+
                 cols_tbl_c = [c for c in ["identificacion","nombre","celular","zona","vehiculo_norm",
                                            "total_cargues","cargues_faltantes","prioridad_impl",
                                            "estado_impl","analista_impl","intentos_impl","proxima_gestion_impl"]
                               if c in df_impl_show.columns]
                 st.caption(f"Mostrando {len(df_impl_show):,} aliados")
                 st.dataframe(df_impl_show[cols_tbl_c], use_container_width=True, hide_index=True)
-                st.download_button("📥 Descargar base Implementación",
+                st.download_button("📥 Descargar filtrado",
                                    df_impl_show.to_csv(index=False).encode("utf-8"),
                                    f"implementacion_{now_col().date()}.csv", "text/csv")
 
@@ -1366,22 +1537,36 @@ if perfil == "Coordinador":
 **Columnas esperadas en el Excel:**
 `identificacion`, `nombre`, `celular`, `vehiculo`, `zona`, `total_cargues`, `fecha_ultimo_cargue`
 
-Los campos CRM (estado, intentos, próxima gestión) se agregan automáticamente.
-Aliados existentes se actualizan sin perder historial CRM.
+Los campos CRM se agregan automáticamente. Usa **Incremental** para conservar el historial.
             """)
+            modo_impl_c = st.radio(
+                "Modo de carga",
+                ["🔄 Incremental (recomendado) — conserva historial CRM",
+                 "♻️ Reemplazar toda la base — borra historial CRM"],
+                key="modo_carga_impl_coord"
+            )
             archivo_impl_c = st.file_uploader("Excel (.xlsx)", type=["xlsx"], key="uploader_impl_coord_tab9")
             if archivo_impl_c:
                 try:
                     df_s_c = pd.read_excel(archivo_impl_c, engine="openpyxl")
-                    df_s_c = df_s_c[[c for c in df_s_c.columns if not str(c).startswith("Unnamed")]].fillna("")
+                    df_s_c = df_s_c[[c for c in df_s_c.columns if not str(c).startswith("Unnamed")]]
+                    df_s_c = _df_safe_str(df_s_c).fillna("")
                     st.success(f"{len(df_s_c):,} registros leídos")
                     st.dataframe(df_s_c.head(5), use_container_width=True)
-                    if st.button("🚀 Cargar a Implementación", key="btn_carga_impl_coord"):
-                        with st.spinner("Procesando..."):
-                            nn_c, na_c, nc_c = cargar_base_implementacion(df_s_c)
-                        st.success(f"✅ {nn_c} nuevos · {na_c} actualizados · {nc_c} ya completaron 7 cargues")
+                    if "Incremental" in modo_impl_c:
+                        if st.button("🚀 Ejecutar Cruce Incremental", key="btn_incr_impl_coord"):
+                            with st.spinner("Procesando cruce incremental..."):
+                                nn_c, na_c, nc_c = cargar_base_implementacion(df_s_c, modo="incremental")
+                            st.success(f"✅ {nn_c} aliados nuevos · {na_c} actualizados · {nc_c} ya con 7 cargues")
+                    else:
+                        st.warning("⚠️ Esto borrará TODA la base de Implementación incluyendo el historial CRM.")
+                        confirmar_impl = st.checkbox("Entiendo que se borrará todo el historial de Implementación", key="confirm_impl_coord")
+                        if confirmar_impl and st.button("♻️ Reemplazar base completa", key="btn_repl_impl_coord"):
+                            with st.spinner("Subiendo base completa..."):
+                                nn_c, na_c, nc_c = cargar_base_implementacion(df_s_c, modo="reemplazar")
+                            st.success(f"✅ {len(df_s_c):,} aliados subidos desde cero.")
                 except Exception as e:
-                    st.error(f"Error: {e}")
+                    st.error(f"Error leyendo el archivo: {e}")
 
 # ================================================================
 # ANALISTA
@@ -1566,11 +1751,16 @@ if perfil == "Analista":
                     st.download_button("📥 Descargar historial",mf.to_csv(index=False).encode("utf-8"),f"historial_{fd}_{fh}.csv","text/csv")
 
     with tab_bus:
-        st.subheader("🔍 Buscar Aliado por Cédula")
+        st.subheader("🔍 Buscar Aliado por Cédula o Teléfono")
         st.caption("Consulta datos, historial y registra una gestión para cualquier aliado.")
-        cedula_bus = st.text_input("Ingresa la cédula", "", key="ana_busq_cedula")
+        cedula_bus = st.text_input("Ingresa la cédula o teléfono", "", key="ana_busq_cedula")
         if cedula_bus.strip() and base is not None:
-            res_b = base[base["identificacion"].astype(str) == cedula_bus.strip()]
+            termino = cedula_bus.strip()
+            # Buscar por cédula primero, luego por celular
+            res_b = base[base["identificacion"].astype(str) == termino]
+            if res_b.empty and "celular" in base.columns:
+                res_b = base[base["celular"].astype(str).str.replace(r"\D","",regex=True) ==
+                             termino.replace(" ","")]
             if res_b.empty:
                 st.warning(f"No se encontró ningún aliado con cédula **{cedula_bus}**.")
             else:
@@ -1660,13 +1850,23 @@ if perfil == "Analista":
                     ya_impl_hoy_a = set(hh_a[hh_a["fecha"].dt.date == now_col().date()]["identificacion"].astype(str).tolist())
                     gestionados_hoy_a = gestionados_hoy_a | ya_impl_hoy_a
 
-                mis_a["_ya_hoy"] = mis_a["identificacion"].astype(str).isin(gestionados_hoy_a)
-                pendientes_a     = mis_a[~mis_a["_ya_hoy"]].copy()
-                ya_gest_a        = mis_a[mis_a["_ya_hoy"]].copy()
+                # FIX KeyError: verificar que la columna existe antes de operar
+                if "identificacion" not in mis_a.columns or mis_a.empty:
+                    mis_a["_ya_hoy"]   = pd.Series(dtype=bool)
+                    pendientes_a       = mis_a.copy()
+                    ya_gest_a          = mis_a.iloc[0:0].copy()
+                else:
+                    mis_a["_ya_hoy"] = mis_a["identificacion"].astype(str).isin(gestionados_hoy_a)
+                    pendientes_a     = mis_a[~mis_a["_ya_hoy"]].copy()
+                    ya_gest_a        = mis_a[mis_a["_ya_hoy"]].copy()
 
                 orden_a = {"🔴 ALTA":0,"🟡 MEDIA":1,"🟢 BAJA":2}
-                pendientes_a["_ord"] = pendientes_a["prioridad_impl"].map(orden_a).fillna(3)
-                pendientes_a = pendientes_a.sort_values("_ord").drop(columns=["_ord","_ya_hoy"]).reset_index(drop=True)
+                if not pendientes_a.empty and "prioridad_impl" in pendientes_a.columns:
+                    pendientes_a["_ord"] = pendientes_a["prioridad_impl"].map(orden_a).fillna(3)
+                    drop_cols = [c for c in ["_ord","_ya_hoy"] if c in pendientes_a.columns]
+                    pendientes_a = pendientes_a.sort_values("_ord").drop(columns=drop_cols).reset_index(drop=True)
+                elif "_ya_hoy" in pendientes_a.columns:
+                    pendientes_a = pendientes_a.drop(columns=["_ya_hoy"]).reset_index(drop=True)
 
                 hechas_impl_a = st.session_state.get("impl_hechas_a", 0)
                 pend_n_a = len(pendientes_a)
