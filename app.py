@@ -1850,23 +1850,29 @@ if perfil == "Analista":
                     ya_impl_hoy_a = set(hh_a[hh_a["fecha"].dt.date == now_col().date()]["identificacion"].astype(str).tolist())
                     gestionados_hoy_a = gestionados_hoy_a | ya_impl_hoy_a
 
-                # FIX KeyError: verificar que la columna existe antes de operar
-                if "identificacion" not in mis_a.columns or mis_a.empty:
-                    mis_a["_ya_hoy"]   = pd.Series(dtype=bool)
-                    pendientes_a       = mis_a.copy()
-                    ya_gest_a          = mis_a.iloc[0:0].copy()
-                else:
+                # FIX COMPLETO: siempre operar de forma segura sobre mis_a
+                _col_id_ok = "identificacion" in mis_a.columns and not mis_a.empty
+                if _col_id_ok:
+                    mis_a = mis_a.copy()
                     mis_a["_ya_hoy"] = mis_a["identificacion"].astype(str).isin(gestionados_hoy_a)
-                    pendientes_a     = mis_a[~mis_a["_ya_hoy"]].copy()
-                    ya_gest_a        = mis_a[mis_a["_ya_hoy"]].copy()
+                    pendientes_a = mis_a[~mis_a["_ya_hoy"]].copy()
+                    ya_gest_a    = mis_a[mis_a["_ya_hoy"]].copy()
+                else:
+                    # DataFrame vacío con columnas mínimas para que el resto no falle
+                    _empty_cols = list(df_impl_a.columns) if df_impl_a is not None else ["identificacion"]
+                    pendientes_a = pd.DataFrame(columns=_empty_cols)
+                    ya_gest_a    = pd.DataFrame(columns=_empty_cols)
+
+                # Limpiar columna auxiliar y ordenar
+                for _df_tmp in [pendientes_a, ya_gest_a]:
+                    if "_ya_hoy" in _df_tmp.columns:
+                        _df_tmp.drop(columns=["_ya_hoy"], inplace=True)
 
                 orden_a = {"🔴 ALTA":0,"🟡 MEDIA":1,"🟢 BAJA":2}
                 if not pendientes_a.empty and "prioridad_impl" in pendientes_a.columns:
+                    pendientes_a = pendientes_a.copy()
                     pendientes_a["_ord"] = pendientes_a["prioridad_impl"].map(orden_a).fillna(3)
-                    drop_cols = [c for c in ["_ord","_ya_hoy"] if c in pendientes_a.columns]
-                    pendientes_a = pendientes_a.sort_values("_ord").drop(columns=drop_cols).reset_index(drop=True)
-                elif "_ya_hoy" in pendientes_a.columns:
-                    pendientes_a = pendientes_a.drop(columns=["_ya_hoy"]).reset_index(drop=True)
+                    pendientes_a = pendientes_a.sort_values("_ord").drop(columns=["_ord"]).reset_index(drop=True)
 
                 hechas_impl_a = st.session_state.get("impl_hechas_a", 0)
                 pend_n_a = len(pendientes_a)
@@ -1886,8 +1892,12 @@ if perfil == "Analista":
 
                 st.markdown("---")
                 st.markdown("#### 📞 Registrar gestión")
-                todos_ids_a = pendientes_a["identificacion"].astype(str).tolist()
-                if not ya_gest_a.empty:
+                # FIX: verificar columna identificacion antes de acceder
+                if "identificacion" in pendientes_a.columns:
+                    todos_ids_a = pendientes_a["identificacion"].astype(str).tolist()
+                else:
+                    todos_ids_a = []
+                if not ya_gest_a.empty and "identificacion" in ya_gest_a.columns:
                     todos_ids_a += ya_gest_a["identificacion"].astype(str).tolist()
 
                 if not todos_ids_a:
