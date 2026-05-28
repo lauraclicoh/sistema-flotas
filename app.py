@@ -590,7 +590,8 @@ def guardar_reparto(df):
 # ================================================================
 # MÓDULO IMPLEMENTACIÓN
 # ================================================================
-CARGUES_META_IMPL = 7
+CARGUES_META_IMPL = 20  # Meta final: pasa a Programación
+CARGUES_MIN_IMPL  = 7   # Los analistas reciben desde el cargue 7
 PASS_IMPL_COORD   = "impl_coord"
 PASS_IMPL_ANA     = "impl2024"
 ANALISTAS_IMPL    = ["Analista Impl 1","Analista Impl 2","Analista Impl 3","Analista Impl 4"]
@@ -605,7 +606,7 @@ ESTADOS_IMPL = [
     "Abandona — vehículo averiado",
     "Abandona — trabaja fijo",
     "Abandona — no le interesa",
-    "Llegó al 7mo cargue",
+    "Llegó al 20mo cargue",
 ]
 RAZONES_IMPL = [
     "Tarifa baja","Zona no le conviene","Vehículo averiado","Trabaja fijo",
@@ -614,10 +615,16 @@ RAZONES_IMPL = [
 NO_RESP_IMPL = ["Apagado","Fuera de servicio","No contestó","Número errado"]
 
 def _prio_impl(cargues):
+    """
+    Prioridad para aliados en rango 7-20 cargues.
+    7-10  → ALTA  (recién llegados, mayor riesgo de abandono)
+    11-15 → MEDIA
+    16-19 → BAJA  (cerca de la meta)
+    """
     try: cargues = int(cargues)
     except: return "🟢 BAJA"
-    if cargues <= 2: return "🔴 ALTA"
-    if cargues <= 4: return "🟡 MEDIA"
+    if cargues <= 10: return "🔴 ALTA"
+    if cargues <= 15: return "🟡 MEDIA"
     return "🟢 BAJA"
 
 def calcular_proxima_impl(resultado, estado, intentos):
@@ -661,6 +668,9 @@ def _get_impl(force=False):
                 df["total_cargues"] = 0
 
             df["intentos_impl"]    = pd.to_numeric(df.get("intentos_impl", pd.Series(0, index=df.index)), errors="coerce").fillna(0).astype(int)
+            # Solo aliados en rango 7-19 (los de 20+ ya pasaron a Programación)
+            df = df[(df["total_cargues"] >= CARGUES_MIN_IMPL) &
+                    (df["total_cargues"] < CARGUES_META_IMPL)].copy() if len(df) > 0 else df
             df["cargues_faltantes"] = (CARGUES_META_IMPL - df["total_cargues"]).clip(lower=0)
             df["prioridad_impl"]    = df["total_cargues"].apply(_prio_impl)
 
@@ -765,8 +775,8 @@ def _actualizar_crm_impl(identificacion, resultado, estado, razon, total_cargues
             except: intentos_n = 1
         proxima = calcular_proxima_impl(resultado, estado, intentos_n)
         proxima_str = _safe_str(proxima) if not isinstance(proxima, str) else proxima
-        estado_pipeline = "Completó 7 cargues" if (
-            str(estado) == "Llegó al 7mo cargue" or int(total_cargues or 0) >= CARGUES_META_IMPL
+        estado_pipeline = "Completó 20 cargues — Pasa a Programación" if (
+            str(estado) == "Llegó al 20mo cargue" or int(total_cargues or 0) >= CARGUES_META_IMPL
         ) else str(estado or "")
         updates = []
         for col_name, val in [
@@ -1337,6 +1347,11 @@ if perfil == "Coordinador":
             else:
                 # Segmentar la base
                 completados_c = df_impl_c[df_impl_c["total_cargues"] >= CARGUES_META_IMPL]
+                activo_impl_c = df_impl_c[
+                    (df_impl_c["total_cargues"] >= CARGUES_MIN_IMPL) &
+                    (df_impl_c["total_cargues"] < CARGUES_META_IMPL)
+                ]
+                total_activo  = len(activo_impl_c)
                 abandonaron_c = df_impl_c[df_impl_c.get("estado_impl", pd.Series(dtype=str)).astype(str).str.contains("Abandona", na=False)]
                 sin_contacto_c = df_impl_c[
                     df_impl_c.get("ultimo_resultado_impl", pd.Series(dtype=str)).astype(str).isin(NO_RESP_IMPL) &
@@ -1346,7 +1361,8 @@ if perfil == "Coordinador":
                     ~df_impl_c.index.isin(completados_c.index) &
                     ~df_impl_c.index.isin(abandonaron_c.index)
                 ]
-                total_impl = len(df_impl_c)
+                total_impl   = len(df_impl_c)
+                # total_activo ya definido arriba
                 pct_grad   = round(len(completados_c)/max(total_impl,1)*100,1)
                 pct_churn  = round(len(abandonaron_c)/max(total_impl,1)*100,1)
                 pct_noresp = round(len(sin_contacto_c)/max(total_impl,1)*100,1)
@@ -1356,10 +1372,10 @@ if perfil == "Coordinador":
                 st.markdown("##### Seguimiento Implementación")
                 kc1,kc2,kc3,kc4,kc5 = st.columns(5)
                 kc1.metric("👥 Total Drivers",  f"{total_impl}")
-                kc2.metric("🔄 En Implementación", f"{len(activos_c)}", "Activos")
-                kc3.metric(f"🎓 % Graduación (≥R{CARGUES_META_IMPL})",
+                kc2.metric("🔄 Activos R7–R19", f"{total_activo:,}", "En seguimiento")
+                kc3.metric("📈 % Conversión a Programación",
                            f"{pct_grad}%", f"{len(completados_c)} Drivers")
-                kc4.metric("🔴 % Churn Total",
+                kc4.metric("⚠️ Tasa de Abandono",
                            f"{pct_churn}%", f"-{len(abandonaron_c)} Drivers", delta_color="inverse")
                 kc5.metric("📵 No contesta / Sin resp.",
                            f"{pct_noresp}%", f"{len(sin_contacto_c)} Drivers", delta_color="inverse")
@@ -1373,8 +1389,11 @@ if perfil == "Coordinador":
                     st.markdown("##### Funnel de retención R1 → R7")
                     # Contar aliados por cargue acumulado
                     funnel_data = []
-                    for r in range(1, CARGUES_META_IMPL + 1):
-                        n = len(df_impl_c[df_impl_c["total_cargues"] >= r])
+                    for r in range(CARGUES_MIN_IMPL, CARGUES_META_IMPL + 1):
+                        n = len(df_impl_c[
+                            (df_impl_c["total_cargues"] >= r) &
+                            (df_impl_c["total_cargues"] < CARGUES_META_IMPL)
+                        ])
                         funnel_data.append({"Ruta": f"R{r}", "Aliados": n})
                     df_funnel = pd.DataFrame(funnel_data)
                     fig_funnel = px.bar(
@@ -1382,7 +1401,7 @@ if perfil == "Coordinador":
                         text="Aliados",
                         color="Ruta",
                         color_discrete_sequence=["#1565C0","#1976D2","#42A5F5","#64B5F6","#90CAF9","#BBDEFB","#E3F2FD"][:CARGUES_META_IMPL],
-                        title=f"Funnel retención R1 → R{CARGUES_META_IMPL}"
+                        title=f"Funnel retención R{CARGUES_MIN_IMPL} → R{CARGUES_META_IMPL}"
                     )
                     fig_funnel.update_traces(textposition="outside")
                     fig_funnel.update_layout(showlegend=False, plot_bgcolor="#f8f9fa",
@@ -1392,9 +1411,9 @@ if perfil == "Coordinador":
                 with col_barras:
                     st.markdown("##### % Churn por tramo (abandono entre rutas)")
                     churn_data = []
-                    for r in range(1, CARGUES_META_IMPL):
-                        n_ini = len(df_impl_c[df_impl_c["total_cargues"] >= r])
-                        n_sig = len(df_impl_c[df_impl_c["total_cargues"] >= r + 1])
+                    for r in range(CARGUES_MIN_IMPL, CARGUES_META_IMPL):
+                        n_ini = len(df_impl_c[df_impl_c["total_cargues"] == r])
+                        n_sig = len(df_impl_c[df_impl_c["total_cargues"] == r + 1])
                         pct_ch = round((1 - n_sig/max(n_ini,1))*100, 2) if n_ini > 0 else 0
                         churn_data.append({"Tramo": f"R{r}→R{r+1}", "% Churn": pct_ch})
                     df_churn = pd.DataFrame(churn_data)
@@ -1404,7 +1423,7 @@ if perfil == "Coordinador":
                         text="% Churn",
                         color="Tramo",
                         color_discrete_sequence=CHURN_COLORS * 3,
-                        title="% Abandono por tramo de ruta"
+                        title="% Abandono por tramo (R7 → R20)"
                     )
                     fig_churn.update_traces(texttemplate="%{text:.2f}%", textposition="outside")
                     fig_churn.update_layout(showlegend=False, plot_bgcolor="#f8f9fa",
@@ -1426,7 +1445,7 @@ if perfil == "Coordinador":
                 listos_c = completados_c.copy()
                 if not listos_c.empty:
                     st.markdown("---")
-                    st.markdown(f"#### ✅ {len(listos_c)} aliados con {CARGUES_META_IMPL} cargues — listos para Programación")
+                    st.markdown("#### ✅ " + str(len(listos_c)) + f" aliados con R{CARGUES_META_IMPL}+ — listos para Programación")
                     cols_lc = [c for c in ["identificacion","nombre","celular","zona","vehiculo_norm","total_cargues"]
                                if c in listos_c.columns]
                     st.dataframe(listos_c[cols_lc], use_container_width=True, hide_index=True)
@@ -1480,7 +1499,7 @@ if perfil == "Coordinador":
                 pct_abd_c = round(abd_c / max(total_ic, 1) * 100, 1)
 
                 ci1k, ci2k, ci3k = st.columns(3)
-                ci1k.metric("% conversión a 7 cargues", f"{pct_conv_c}%")
+                ci1k.metric("% Conversión a Programación (R20)", f"{pct_conv_c}%")
                 ci2k.metric("% abandono", f"{pct_abd_c}%")
                 ci3k.metric("Cargue promedio",
                             f"{df_impl_c['total_cargues'].mean():.1f}" if total_ic else "N/A")
@@ -1495,7 +1514,7 @@ if perfil == "Coordinador":
                     zona_gc["% conv"] = (zona_gc["completaron"] / zona_gc["total"] * 100).round(1)
                     st.dataframe(zona_gc.sort_values("% conv", ascending=False), use_container_width=True, hide_index=True)
                     fig_zona_c = px.bar(zona_gc, x="zona", y="% conv",
-                                        title="% Conversión a 7 cargues por zona",
+                                        title="% Conversión a Programación por zona",
                                         color="% conv",
                                         color_continuous_scale=["#dc3545","#ffc107","#28a745"],
                                         range_color=[0, 100])
@@ -1535,7 +1554,7 @@ if perfil == "Coordinador":
             st.subheader("📤 Cargar base de Implementación")
             st.info("""
 **Columnas esperadas en el Excel:**
-`identificacion`, `nombre`, `celular`, `vehiculo`, `zona`, `total_cargues`, `fecha_ultimo_cargue`
+`identificacion`, `nombre`, `celular`, `vehiculo`, `zona`, `total_cargues` (debe ser ≥ 7), `fecha_ultimo_cargue`
 
 Los campos CRM se agregan automáticamente. Usa **Incremental** para conservar el historial.
             """)
@@ -1557,7 +1576,7 @@ Los campos CRM se agregan automáticamente. Usa **Incremental** para conservar e
                         if st.button("🚀 Ejecutar Cruce Incremental", key="btn_incr_impl_coord"):
                             with st.spinner("Procesando cruce incremental..."):
                                 nn_c, na_c, nc_c = cargar_base_implementacion(df_s_c, modo="incremental")
-                            st.success(f"✅ {nn_c} aliados nuevos · {na_c} actualizados · {nc_c} ya con 7 cargues")
+                            st.success(f"✅ {nn_c} aliados nuevos · {na_c} actualizados · {nc_c} ya alcanzaron R20 (pasan a Programación)")
                     else:
                         st.warning("⚠️ Esto borrará TODA la base de Implementación incluyendo el historial CRM.")
                         confirmar_impl = st.checkbox("Entiendo que se borrará todo el historial de Implementación", key="confirm_impl_coord")
@@ -1811,7 +1830,7 @@ if perfil == "Analista":
 
     # ── TAB IMPLEMENTACIÓN (dentro del módulo Analista) ─────────────────────
     with tab_impl:
-        st.subheader("⚙️ Implementación — Mis aliados del 2do al 7mo cargue")
+        st.subheader("⚙️ Implementación — Aliados del R7 al R20 (gestión hasta Programación)")
         df_impl_a  = _get_impl()
         hist_impl_a = _get_hist_impl()
 
@@ -1947,8 +1966,8 @@ if perfil == "Analista":
                                 "total_cargues_momento": tc_ia,
                             })
                             st.session_state["impl_hechas_a"] = st.session_state.get("impl_hechas_a", 0) + 1
-                            if str(er_ia) == "Llegó al 7mo cargue" or tc_ia >= CARGUES_META_IMPL:
-                                st.success(f"🏆 ¡{ali_ia} completó los 7 cargues! Pasa a Programación.")
+                            if str(er_ia) == "Llegó al 20mo cargue" or tc_ia >= CARGUES_META_IMPL:
+                                st.success(f"🏆 ¡{ali_ia} completó los 20 cargues! Pasa a Programación.")
                             else:
                                 st.success(f"✅ Guardado para {ali_ia}.")
                             st.rerun()
@@ -2006,12 +2025,12 @@ if perfil == "Analista":
                         t_ia  = len(mh_ia)
                         sc_ia = len(mh_ia[mh_ia["resultado"] == "Sí contestó"])
                         nr_ia = len(mh_ia[mh_ia["resultado"].isin(NO_RESP_IMPL)])
-                        c7_ia = len(mh_ia[mh_ia["estado"].astype(str).str.contains("7mo cargue", na=False)])
+                        c7_ia = len(mh_ia[mh_ia["estado"].astype(str).str.contains("20mo cargue", na=False)])
                         ci1h, ci2h, ci3h, ci4h = st.columns(4)
                         ci1h.metric("📞 Llamadas", t_ia)
                         ci2h.metric("✅ Contactados", sc_ia)
                         ci3h.metric("📵 No resp.", nr_ia)
-                        ci4h.metric("🏆 7mo cargue", c7_ia)
+                        ci4h.metric("🏆 Llegaron R20", c7_ia)
                         st.markdown("---")
                         mh_ia["Hora"] = mh_ia["fecha"].dt.strftime("%I:%M %p")
                         st.dataframe(
