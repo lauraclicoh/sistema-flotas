@@ -21,34 +21,31 @@ ANALISTAS = {
     "Carlos Andres Loaiza":  "cloaiza@clicoh.com",
 }
 NOMBRES_ANALISTAS = list(ANALISTAS.keys())
-# PUNTO 9: Campos oficiales CRM
 RESULTADOS       = ["Apagado","Fuera de servicio","No contestó","Número errado","Sí contestó"]
 ESTADOS_FINALES  = [
-    "Aliado rechaza la oferta",
-    "En implementación",
-    "Fuera de servicio",
-    "No contestó",
-    "Número errado",
-    "De programación",
+    "Aliado Rechaza la oferta",
+    "Aliado Fleet/Delivery no acepta hub",
+    "Interesado llega a cargue",
+    "Interesado esporádico",
+    "Empleado",
+    "Point",
 ]
 RAZONES = [
-    "Reintegro No activo",
-    "Reintegro Activo",
-    "Fuera de servicio",
-    "No contestó",
-    "Número errado",
-    "Cargando fijo",
-    "Cargue esporádico",
+    "Interesado carga hoy",
     "No le interesa / cuestiones personales",
-    "No tiene vehículo / vehículo dañado",
-    "Peso / volumen / recorrido",
+    "No tiene Vh / Vh dañado",
+    "Peso / Volumen / recorrido",
     "Tarifa",
     "Tiene trabajo fijo",
     "Fuera de la ciudad",
+    "Aliado no carga en HUB",
+    "Ocasional",
+    "Empleado",
+    "Point",
 ]
 NO_RESPONDEN      = ["Apagado","Fuera de servicio","No contestó","Número errado"]
-NO_VOLVER_ESTADOS = ["Aliado rechaza la oferta","Fuera de servicio"]
-NO_VOLVER_RAZONES = ["No le interesa / cuestiones personales","Fuera de servicio"]
+NO_VOLVER_ESTADOS = ["Aliado Rechaza la oferta","Empleado","Point"]
+NO_VOLVER_RAZONES = ["No le interesa / cuestiones personales"]
 COLS_CRM = ["intentos","ultimo_resultado","ultimo_estado","ultima_razon","fecha_gestion","proxima_gestion"]
 
 SCOPES = [
@@ -562,23 +559,9 @@ def procesar_incremental(df_nuevo):
     base_final = pd.concat([base_actualizada, nuevos], ignore_index=True)
     base_final = base_final.fillna("")
     base_final = base_final.loc[:, ~base_final.columns.duplicated()]
-    # PUNTO 3: aliados que existían pero NO están en la nueva base → PAUSADO
-    ids_nuevos_set = set(df_nuevo["identificacion"].unique())
-    desaparecidos  = base_actual[~base_actual["identificacion"].isin(ids_nuevos_set)].copy()
-    if not desaparecidos.empty:
-        base_final_idx = base_final.set_index("identificacion")
-        for idd in desaparecidos["identificacion"].tolist():
-            if idd in base_final_idx.index:
-                proxima_pausa = _safe_str(now_col() + timedelta(days=30))
-                base_final_idx.at[idd, "proxima_gestion"]  = proxima_pausa
-                base_final_idx.at[idd, "ultimo_estado"]    = "PAUSADO — no aparece en nueva base"
-                base_final_idx.at[idd, "fecha_gestion"]    = _safe_str(now_col())
-        base_final = base_final_idx.reset_index()
-        base_final = base_final.fillna("")
-
     reemplazar_hoja("BASE", base_final)
     _invalidar_base()
-    return len(nuevos), len(existentes_datos), len(desaparecidos)
+    return len(nuevos), len(existentes_datos)
 
 def leer_config(analista):
     if "config_df" not in st.session_state:
@@ -1235,10 +1218,8 @@ if perfil == "Coordinador":
                 if "Incremental" in modo:
                     if st.button("🚀 Ejecutar Cruce Incremental"):
                         with st.spinner("Procesando cruce..."):
-                            result_incr = procesar_incremental(df_s)
-                            nn, na = result_incr[0], result_incr[1]
-                            np_ = result_incr[2] if len(result_incr) > 2 else 0
-                        st.success(f"✅ {nn} aliados nuevos · {na} actualizados · {np_} marcados como PAUSADO (no aparecen en nueva base)")
+                            nn,na=procesar_incremental(df_s)
+                        st.success(f"✅ {nn} aliados nuevos añadidos · {na} aliados actualizados")
                 else:
                     st.warning("⚠️ Esto borrará TODA la base actual incluyendo el historial CRM.")
                     confirmar=st.checkbox("Entiendo que se borrará todo el historial CRM")
@@ -1428,50 +1409,27 @@ if perfil == "Coordinador":
                     st.plotly_chart(fig_funnel, use_container_width=True)
 
                 with col_barras:
-                    st.markdown("##### Permanencia de Aliados por Segmento")
-                    # 3 segmentos operativos claros
-                    segmentos = [
-                        ("R1 → R7",  1,  7),
-                        ("R7 → R10", 7, 10),
-                        ("R10 → R20",10, 20),
-                    ]
-                    seg_data = []
-                    for label, r_ini, r_fin in segmentos:
-                        n_ini = len(df_impl_c[df_impl_c["total_cargues"] >= r_ini])
-                        n_fin = len(df_impl_c[df_impl_c["total_cargues"] >= r_fin])
-                        if n_ini > 0:
-                            pct_perm = round(n_fin / n_ini * 100, 1)
-                            pct_deser = round(100 - pct_perm, 1)
-                        else:
-                            pct_perm, pct_deser = 0.0, 0.0
-                        seg_data.append({
-                            "Segmento": label,
-                            "% Permanencia": pct_perm,
-                            "% Deserción": pct_deser,
-                            "Inicio": n_ini,
-                            "Llegaron": n_fin,
-                        })
-                    df_seg = pd.DataFrame(seg_data)
-                    # Mostrar tabla resumen con valores siempre visibles
-                    st.dataframe(
-                        df_seg[["Segmento","Inicio","Llegaron","% Permanencia","% Deserción"]],
-                        use_container_width=True, hide_index=True
+                    st.markdown("##### % Churn por tramo (abandono entre rutas)")
+                    churn_data = []
+                    for r in range(CARGUES_MIN_IMPL, CARGUES_META_IMPL):
+                        n_ini = len(df_impl_c[df_impl_c["total_cargues"] == r])
+                        n_sig = len(df_impl_c[df_impl_c["total_cargues"] == r + 1])
+                        pct_ch = round((1 - n_sig/max(n_ini,1))*100, 2) if n_ini > 0 else 0
+                        churn_data.append({"Tramo": f"R{r}→R{r+1}", "% Churn": pct_ch})
+                    df_churn = pd.DataFrame(churn_data)
+                    CHURN_COLORS = ["#C62828","#E53935","#EF9A9A","#FFCC02","#66BB6A"]
+                    fig_churn = px.bar(
+                        df_churn, x="Tramo", y="% Churn",
+                        text="% Churn",
+                        color="Tramo",
+                        color_discrete_sequence=CHURN_COLORS * 3,
+                        title="% Abandono por tramo (R7 → R20)"
                     )
-                    fig_seg = px.bar(
-                        df_seg, x="Segmento",
-                        y=["% Permanencia","% Deserción"],
-                        barmode="stack",
-                        text_auto=True,
-                        color_discrete_map={"% Permanencia":"#28a745","% Deserción":"#dc3545"},
-                        title="Permanencia vs Deserción por Segmento Operativo",
-                    )
-                    fig_seg.update_traces(texttemplate="%{value:.1f}%", textposition="inside")
-                    fig_seg.update_layout(
-                        showlegend=True, plot_bgcolor="#f8f9fa",
-                        paper_bgcolor="#f8f9fa", font_color="#333",
-                        yaxis_ticksuffix="%", yaxis_range=[0,100]
-                    )
-                    st.plotly_chart(fig_seg, use_container_width=True)
+                    fig_churn.update_traces(texttemplate="%{text:.2f}%", textposition="outside")
+                    fig_churn.update_layout(showlegend=False, plot_bgcolor="#f8f9fa",
+                                            paper_bgcolor="#f8f9fa", font_color="#333",
+                                            yaxis_ticksuffix="%")
+                    st.plotly_chart(fig_churn, use_container_width=True)
 
                 # ── Alta prioridad ─────────────────────────────────────────
                 alta_c = df_impl_c[df_impl_c["prioridad_impl"] == "🔴 ALTA"].copy()
