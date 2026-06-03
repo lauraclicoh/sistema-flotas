@@ -255,6 +255,9 @@ def _get_base():
                 df["dias"] = pd.to_numeric(df["dias_desde_ult_srv."], errors="coerce").fillna(0).astype(int)
             for col in COLS_CRM:
                 if col not in df.columns: df[col] = 0 if col=="intentos" else ""
+            if "estado_base" not in df.columns:
+                df["estado_base"] = "ACTIVO"
+            df["estado_base"] = df["estado_base"].replace("", "ACTIVO").fillna("ACTIVO")
             df["intentos"] = pd.to_numeric(df["intentos"], errors="coerce").fillna(0).astype(int)
             df = df.loc[:, ~df.columns.duplicated()]
             # ── NUEVO: calcular estado_aliado al cargar ──────
@@ -320,6 +323,8 @@ def calcular_proxima(resultado, estado, razon, intentos):
 def filtrar_pool(df):
     if "proxima_gestion" not in df.columns: return df
     df = df.copy()
+    if "estado_base" in df.columns:
+        df = df[df["estado_base"].astype(str).str.upper() != "INACTIVO"]
     df = df[df["proxima_gestion"].astype(str).str.upper() != "NO_VOLVER"]
     def disponible(v):
         v = str(v).strip()
