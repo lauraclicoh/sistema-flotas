@@ -668,9 +668,8 @@ def _get_impl(force=False):
                 df["total_cargues"] = 0
 
             df["intentos_impl"]    = pd.to_numeric(df.get("intentos_impl", pd.Series(0, index=df.index)), errors="coerce").fillna(0).astype(int)
-            # Solo aliados en rango 7-19 (los de 20+ ya pasaron a Programación)
-            df = df[(df["total_cargues"] >= CARGUES_MIN_IMPL) &
-                    (df["total_cargues"] < CARGUES_META_IMPL)].copy() if len(df) > 0 else df
+            # No filtrar aqui: el dashboard necesita ver R20+ listos para Programacion.
+            # La vista de analista filtra pendientes y bloqueados antes de gestionar.
             df["cargues_faltantes"] = (CARGUES_META_IMPL - df["total_cargues"]).clip(lower=0)
             df["prioridad_impl"]    = df["total_cargues"].apply(_prio_impl)
 
@@ -689,9 +688,21 @@ def _get_hist_impl(force=False):
     ultima = st.session_state.get("hist_impl_last", 0)
     if force or "hist_impl_df" not in st.session_state or (ahora - ultima) > 30:
         cols = ["fecha","analista","identificacion","resultado","estado","razon","obs","total_cargues_momento"]
-        df   = leer_hoja("HIST_IMPLEMENTACION", cols)
+        try:
+            df = leer_hoja("HIST_IMPLEMENTACION", cols)
+        except Exception:
+            df = pd.DataFrame(columns=cols)
         if df.empty:
             df = pd.DataFrame(columns=cols)
+            try:
+                sh = conectar_sheets()
+                if sh:
+                    hojas = [ws.title for ws in sh.worksheets()]
+                    if "HIST_IMPLEMENTACION" not in hojas:
+                        ws_new = sh.add_worksheet(title="HIST_IMPLEMENTACION", rows=1000, cols=10)
+                        ws_new.append_row(cols)
+            except Exception:
+                pass
         else:
             df["fecha"] = pd.to_datetime(df["fecha"], errors="coerce")
             df = df.dropna(subset=["fecha"])
@@ -716,25 +727,18 @@ def _agregar_hist_impl_local(row):
         st.session_state["hist_impl_df"] = nuevo
     st.session_state["hist_impl_last"] = time.time()
 
-def _get_gestionados_hoy_todos():
+def _get_gestionados_hoy_impl():
+    """Solo gestiones del modulo Implementacion, independiente de Programacion."""
     gestionados = set()
     try:
-        df_g = leer_hoja("GESTIONADOS_HOY")
-        if not df_g.empty:
-            df_g.columns = df_g.columns.str.lower()
-            hoy = str(now_col().date())
-            hoy_g = df_g[df_g["fecha"].astype(str).str.startswith(hoy)]
-            gestionados.update(hoy_g["identificacion"].astype(str).tolist())
-    except Exception:
-        pass
-    try:
-        hist = leer_hoja("HISTORICO")
-        if not hist.empty:
-            hist.columns = hist.columns.str.lower()
-            hist["fecha"] = pd.to_datetime(hist["fecha"], errors="coerce")
-            hist = hist.dropna(subset=["fecha"])
-            hoy_h = hist[hist["fecha"].dt.date == now_col().date()]
-            gestionados.update(hoy_h["identificacion"].astype(str).tolist())
+        hi = st.session_state.get("hist_impl_df", pd.DataFrame())
+        if not hi.empty and "fecha" in hi.columns:
+            hh = hi.copy()
+            hh["fecha"] = pd.to_datetime(hh["fecha"], errors="coerce")
+            hh = hh.dropna(subset=["fecha"])
+            hoy_h = hh[hh["fecha"].dt.date == now_col().date()]
+            if "identificacion" in hoy_h.columns:
+                gestionados.update(hoy_h["identificacion"].astype(str).tolist())
     except Exception:
         pass
     return gestionados
@@ -748,11 +752,6 @@ def guardar_gestion_impl(row):
     ]
     agregar_filas("HIST_IMPLEMENTACION", [fila])
     _agregar_hist_impl_local(row)
-    try:
-        agregar_filas("GESTIONADOS_HOY", [[_safe_str(now_col().date()),
-                                            str(row.get("identificacion","")), "IMPLEMENTACION"]])
-    except Exception:
-        pass
     _actualizar_crm_impl(row.get("identificacion"), row.get("resultado"),
                           row.get("estado"), row.get("razon"), row.get("total_cargues_momento", 0))
 
@@ -1860,20 +1859,14 @@ if perfil == "Analista":
                 if "proxima_gestion_impl" in mis_a.columns:
                     mis_a = mis_a[mis_a["proxima_gestion_impl"].apply(disp_impl_a)]
 
-                # Gestionados hoy en CUALQUIER módulo
-                gestionados_hoy_a = _get_gestionados_hoy_todos()
-                if not hist_impl_a.empty:
-                    hh_a = hist_impl_a.copy()
-                    hh_a["fecha"] = pd.to_datetime(hh_a["fecha"], errors="coerce")
-                    hh_a = hh_a.dropna(subset=["fecha"])
-                    ya_impl_hoy_a = set(hh_a[hh_a["fecha"].dt.date == now_col().date()]["identificacion"].astype(str).tolist())
-                    gestionados_hoy_a = gestionados_hoy_a | ya_impl_hoy_a
+                # Gestionados hoy solo en Implementacion: independiente de Programacion.
+                gestionados_hoy_impl = _get_gestionados_hoy_impl()
 
                 # FIX COMPLETO: siempre operar de forma segura sobre mis_a
                 _col_id_ok = "identificacion" in mis_a.columns and not mis_a.empty
                 if _col_id_ok:
                     mis_a = mis_a.copy()
-                    mis_a["_ya_hoy"] = mis_a["identificacion"].astype(str).isin(gestionados_hoy_a)
+                    mis_a["_ya_hoy"] = mis_a["identificacion"].astype(str).isin(gestionados_hoy_impl)
                     pendientes_a = mis_a[~mis_a["_ya_hoy"]].copy()
                     ya_gest_a    = mis_a[mis_a["_ya_hoy"]].copy()
                 else:
@@ -1911,6 +1904,7 @@ if perfil == "Analista":
 
                 st.markdown("---")
                 st.markdown("#### 📞 Registrar gestión")
+                st.info("Los campos de esta gestion son independientes del modulo Programacion.")
                 # FIX: verificar columna identificacion antes de acceder
                 if "identificacion" in pendientes_a.columns:
                     todos_ids_a = pendientes_a["identificacion"].astype(str).tolist()
@@ -1928,7 +1922,7 @@ if perfil == "Analista":
                             ali_ia = st.selectbox("Cédula del aliado", todos_ids_a, key="ali_impl_ana")
                             res_ia = st.selectbox("Resultado de la llamada", RESULTADOS_IMPL, key="res_impl_ana")
                         with ci2:
-                            est_ia = st.selectbox("Estado", ["-"] + ESTADOS_IMPL, key="est_impl_ana")
+                            est_ia = st.selectbox("Estado del aliado", ["-"] + ESTADOS_IMPL, key="est_impl_ana")
                             raz_ia = st.selectbox("Razón", ["-"] + RAZONES_IMPL, key="raz_impl_ana")
 
                         fd_ia = mis_a[mis_a["identificacion"].astype(str) == str(ali_ia)]
@@ -1943,8 +1937,6 @@ if perfil == "Analista":
                             cols_fia = st.columns(min(len(ficha_cols_a), 4))
                             for i, cn in enumerate(ficha_cols_a):
                                 cols_fia[i % 4].metric(cn.replace("_", " ").title(), str(f_ia[cn]))
-                            if str(ali_ia) in gestionados_hoy_a:
-                                st.warning("⚠️ Este aliado ya fue gestionado hoy en otro módulo.")
 
                         obs_ia = st.text_area("Observaciones", key="obs_impl_ana")
                         sub_ia = st.form_submit_button("💾 GUARDAR GESTIÓN IMPLEMENTACIÓN")
