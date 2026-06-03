@@ -614,6 +614,21 @@ RAZONES_IMPL = [
 ]
 NO_RESP_IMPL = ["Apagado","Fuera de servicio","No contestó","Número errado"]
 
+def _norm_col_impl(col):
+    try:
+        import unicodedata
+        txt = unicodedata.normalize("NFKD", str(col))
+        txt = "".join(ch for ch in txt if not unicodedata.combining(ch))
+    except Exception:
+        txt = str(col)
+    return txt.strip().lower().replace(" ", "_")
+
+def _norm_id_impl(val):
+    txt = _safe_str(val).strip()
+    if txt.endswith(".0") and txt[:-2].isdigit():
+        txt = txt[:-2]
+    return txt
+
 def _prio_impl(cargues):
     """
     Prioridad para aliados en rango 7-20 cargues.
@@ -646,7 +661,7 @@ def _get_impl(force=False):
         if df.empty:
             st.session_state["impl_df"] = None
         else:
-            df.columns = df.columns.str.strip().str.lower()
+            df.columns = [_norm_col_impl(c) for c in df.columns]
 
             # FIX zona: alias múltiples
             if "zona" not in df.columns:
@@ -675,9 +690,11 @@ def _get_impl(force=False):
 
             # FIX: asegurar columna identificacion
             if "identificacion" not in df.columns:
-                for alias_id in ["cedula","id_aliado","id","documento"]:
+                for alias_id in ["cedula","id_aliado","id","documento","nro_identificacion","numero_identificacion"]:
                     if alias_id in df.columns:
                         df["identificacion"] = df[alias_id]; break
+            if "identificacion" in df.columns:
+                df["identificacion"] = df["identificacion"].apply(_norm_id_impl)
 
             st.session_state["impl_df"] = df
         st.session_state["impl_last_load"] = ahora
@@ -689,20 +706,17 @@ def _get_hist_impl(force=False):
     if force or "hist_impl_df" not in st.session_state or (ahora - ultima) > 30:
         cols = ["fecha","analista","identificacion","resultado","estado","razon","obs","total_cargues_momento"]
         try:
+            sh = conectar_sheets()
+            if sh:
+                hojas = [ws.title for ws in sh.worksheets()]
+                if "HIST_IMPLEMENTACION" not in hojas:
+                    ws_new = sh.add_worksheet(title="HIST_IMPLEMENTACION", rows=1000, cols=10)
+                    ws_new.append_row(cols)
             df = leer_hoja("HIST_IMPLEMENTACION", cols)
         except Exception:
             df = pd.DataFrame(columns=cols)
         if df.empty:
             df = pd.DataFrame(columns=cols)
-            try:
-                sh = conectar_sheets()
-                if sh:
-                    hojas = [ws.title for ws in sh.worksheets()]
-                    if "HIST_IMPLEMENTACION" not in hojas:
-                        ws_new = sh.add_worksheet(title="HIST_IMPLEMENTACION", rows=1000, cols=10)
-                        ws_new.append_row(cols)
-            except Exception:
-                pass
         else:
             df["fecha"] = pd.to_datetime(df["fecha"], errors="coerce")
             df = df.dropna(subset=["fecha"])
@@ -764,8 +778,10 @@ def _actualizar_crm_impl(identificacion, resultado, estado, razon, total_cargues
         if "identificacion" not in headers: return
         col_id  = headers.index("identificacion") + 1
         ids     = ws.col_values(col_id)
-        if str(identificacion) not in ids: return
-        fila    = ids.index(str(identificacion)) + 1
+        ids_norm = [_norm_id_impl(x) for x in ids]
+        identificacion_norm = _norm_id_impl(identificacion)
+        if identificacion_norm not in ids_norm: return
+        fila    = ids_norm.index(identificacion_norm) + 1
         intentos_n = 1
         if "intentos_impl" in headers:
             col_int = headers.index("intentos_impl") + 1
@@ -805,14 +821,13 @@ def cargar_base_implementacion(df_nuevo, modo="incremental"):
     """
     df_nuevo = df_nuevo.copy()
     # Normalizar columnas
-    df_nuevo.columns = (df_nuevo.columns.str.strip().str.lower()
-                        .str.replace(r"\s+","_",regex=True))
+    df_nuevo.columns = [_norm_col_impl(c) for c in df_nuevo.columns]
     df_nuevo = df_nuevo[[c for c in df_nuevo.columns
                           if c and not c.startswith("unnamed") and c != "_"]]
     df_nuevo = df_nuevo.loc[:, ~df_nuevo.columns.duplicated()]
 
     # Detectar columna ID con alias ampliados
-    ALIAS_ID = ["identificacion","id_aliado","id_aliado","cedula","id","documento",
+    ALIAS_ID = ["identificacion","id_aliado","cedula","id","documento",
                 "nro_identificacion","numero_identificacion"]
     col_id = next((a for a in ALIAS_ID if a in df_nuevo.columns), None)
     if not col_id:
@@ -822,7 +837,7 @@ def cargar_base_implementacion(df_nuevo, modo="incremental"):
     df_nuevo = df_nuevo.rename(columns={col_id: "identificacion"})
     # Convertir todo a string seguro antes de subir
     df_nuevo = _df_safe_str(df_nuevo)
-    df_nuevo["identificacion"] = df_nuevo["identificacion"].str.strip()
+    df_nuevo["identificacion"] = df_nuevo["identificacion"].apply(_norm_id_impl)
     df_nuevo = df_nuevo.fillna("")
 
     CRM_COLS = ["estado_impl","analista_impl","intentos_impl","proxima_gestion_impl",
@@ -854,8 +869,7 @@ def cargar_base_implementacion(df_nuevo, modo="incremental"):
         return len(df_nuevo), 0, 0
 
     # Normalizar base guardada
-    base.columns = (base.columns.str.strip().str.lower()
-                    .str.replace(r"\s+","_",regex=True))
+    base.columns = [_norm_col_impl(c) for c in base.columns]
     base = base.loc[:, ~base.columns.duplicated()]
     # Alias de ID en base guardada
     if "identificacion" not in base.columns:
@@ -866,7 +880,7 @@ def cargar_base_implementacion(df_nuevo, modo="incremental"):
             st.error("BASE_IMPLEMENTACION no tiene columna de identificación.")
             return 0, 0, 0
     base = _df_safe_str(base)
-    base["identificacion"] = base["identificacion"].str.strip()
+    base["identificacion"] = base["identificacion"].apply(_norm_id_impl)
     base = base.fillna("")
 
     # total_cargues numérico para contar completados
@@ -1843,7 +1857,10 @@ if perfil == "Analista":
             with tab_mis_a:
                 # Filtrar por analista si existe la columna
                 if "analista_impl" in df_impl_a.columns:
-                    mis_a = df_impl_a[df_impl_a["analista_impl"].astype(str) == nombre].copy()
+                    asignados_a_mi = df_impl_a[
+                        df_impl_a["analista_impl"].astype(str).str.strip() == nombre
+                    ].copy()
+                    mis_a = asignados_a_mi if not asignados_a_mi.empty else df_impl_a.copy()
                 else:
                     mis_a = df_impl_a.copy()
 
@@ -1968,7 +1985,10 @@ if perfil == "Analista":
                 st.subheader("🔍 Buscar aliado en Implementación")
                 cedula_bia = st.text_input("Cédula", "", key="impl_buscar_ana")
                 if cedula_bia.strip():
-                    fila_bia = df_impl_a[df_impl_a["identificacion"].astype(str) == cedula_bia.strip()]
+                    termino_bia = _norm_id_impl(cedula_bia)
+                    fila_bia = df_impl_a[
+                        df_impl_a["identificacion"].apply(_norm_id_impl) == termino_bia
+                    ]
                     if fila_bia.empty:
                         st.warning(f"No se encontró {cedula_bia} en la base de Implementación.")
                     else:
@@ -1988,7 +2008,9 @@ if perfil == "Analista":
                                 st.metric(col.replace("_", " ").title(), str(f_bia[col]))
                         st.markdown("---")
                         if not hist_impl_a.empty:
-                            h_bia = hist_impl_a[hist_impl_a["identificacion"].astype(str) == cedula_bia.strip()].copy()
+                            h_bia = hist_impl_a[
+                                hist_impl_a["identificacion"].apply(_norm_id_impl) == termino_bia
+                            ].copy()
                             if h_bia.empty:
                                 st.info("Sin gestiones en Implementación para este aliado.")
                             else:
