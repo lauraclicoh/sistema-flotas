@@ -1422,27 +1422,45 @@ if perfil == "Coordinador":
                     st.plotly_chart(fig_funnel, use_container_width=True)
 
                 with col_barras:
-                    st.markdown("##### % Churn por tramo (abandono entre rutas)")
-                    churn_data = []
+                    st.markdown("##### Aliados por ruta actual")
+                    ruta_data = []
                     for r in range(CARGUES_MIN_IMPL, CARGUES_META_IMPL):
-                        n_ini = len(df_impl_c[df_impl_c["total_cargues"] == r])
-                        n_sig = len(df_impl_c[df_impl_c["total_cargues"] == r + 1])
-                        pct_ch = round((1 - n_sig/max(n_ini,1))*100, 2) if n_ini > 0 else 0
-                        churn_data.append({"Tramo": f"R{r}→R{r+1}", "% Churn": pct_ch})
-                    df_churn = pd.DataFrame(churn_data)
-                    CHURN_COLORS = ["#C62828","#E53935","#EF9A9A","#FFCC02","#66BB6A"]
-                    fig_churn = px.bar(
-                        df_churn, x="Tramo", y="% Churn",
-                        text="% Churn",
-                        color="Tramo",
-                        color_discrete_sequence=CHURN_COLORS * 3,
-                        title="% Abandono por tramo (R7 → R20)"
+                        n = len(df_impl_c[df_impl_c["total_cargues"] == r])
+                        ruta_data.append({
+                            "Ruta": f"R{r}",
+                            "Aliados": n,
+                            "Estado": "En seguimiento",
+                        })
+                    n_meta = len(df_impl_c[df_impl_c["total_cargues"] >= CARGUES_META_IMPL])
+                    ruta_data.append({
+                        "Ruta": f"R{CARGUES_META_IMPL}+",
+                        "Aliados": n_meta,
+                        "Estado": "Listos para Programaci?n",
+                    })
+                    df_rutas = pd.DataFrame(ruta_data)
+                    fig_rutas = px.bar(
+                        df_rutas,
+                        x="Ruta",
+                        y="Aliados",
+                        text="Aliados",
+                        color="Estado",
+                        color_discrete_map={
+                            "En seguimiento": "#1976D2",
+                            "Listos para Programaci?n": "#2E7D32",
+                        },
+                        title=f"Distribuci?n de aliados desde R{CARGUES_MIN_IMPL} hasta R{CARGUES_META_IMPL}+"
                     )
-                    fig_churn.update_traces(texttemplate="%{text:.2f}%", textposition="outside")
-                    fig_churn.update_layout(showlegend=False, plot_bgcolor="#f8f9fa",
-                                            paper_bgcolor="#f8f9fa", font_color="#333",
-                                            yaxis_ticksuffix="%")
-                    st.plotly_chart(fig_churn, use_container_width=True)
+                    fig_rutas.update_traces(textposition="outside")
+                    fig_rutas.update_layout(
+                        plot_bgcolor="#f8f9fa",
+                        paper_bgcolor="#f8f9fa",
+                        font_color="#333",
+                        yaxis_title="Aliados",
+                        xaxis_title="Ruta actual",
+                        legend_title_text="",
+                    )
+                    st.plotly_chart(fig_rutas, use_container_width=True)
+                    st.dataframe(df_rutas, use_container_width=True, hide_index=True)
 
                 # ── Alta prioridad ─────────────────────────────────────────
                 alta_c = df_impl_c[df_impl_c["prioridad_impl"] == "🔴 ALTA"].copy()
