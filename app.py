@@ -255,9 +255,6 @@ def _get_base():
                 df["dias"] = pd.to_numeric(df["dias_desde_ult_srv."], errors="coerce").fillna(0).astype(int)
             for col in COLS_CRM:
                 if col not in df.columns: df[col] = 0 if col=="intentos" else ""
-            if "estado_base" not in df.columns:
-                df["estado_base"] = "ACTIVO"
-            df["estado_base"] = df["estado_base"].replace("", "ACTIVO").fillna("ACTIVO")
             df["intentos"] = pd.to_numeric(df["intentos"], errors="coerce").fillna(0).astype(int)
             df = df.loc[:, ~df.columns.duplicated()]
             # ── NUEVO: calcular estado_aliado al cargar ──────
@@ -323,8 +320,6 @@ def calcular_proxima(resultado, estado, razon, intentos):
 def filtrar_pool(df):
     if "proxima_gestion" not in df.columns: return df
     df = df.copy()
-    if "estado_base" in df.columns:
-        df = df[df["estado_base"].astype(str).str.upper() != "INACTIVO"]
     df = df[df["proxima_gestion"].astype(str).str.upper() != "NO_VOLVER"]
     def disponible(v):
         v = str(v).strip()
@@ -619,21 +614,6 @@ RAZONES_IMPL = [
 ]
 NO_RESP_IMPL = ["Apagado","Fuera de servicio","No contestó","Número errado"]
 
-def _norm_col_impl(col):
-    try:
-        import unicodedata
-        txt = unicodedata.normalize("NFKD", str(col))
-        txt = "".join(ch for ch in txt if not unicodedata.combining(ch))
-    except Exception:
-        txt = str(col)
-    return txt.strip().lower().replace(" ", "_")
-
-def _norm_id_impl(val):
-    txt = _safe_str(val).strip()
-    if txt.endswith(".0") and txt[:-2].isdigit():
-        txt = txt[:-2]
-    return txt
-
 def _prio_impl(cargues):
     """
     Prioridad para aliados en rango 7-20 cargues.
@@ -666,7 +646,7 @@ def _get_impl(force=False):
         if df.empty:
             st.session_state["impl_df"] = None
         else:
-            df.columns = [_norm_col_impl(c) for c in df.columns]
+            df.columns = df.columns.str.strip().str.lower()
 
             # FIX zona: alias múltiples
             if "zona" not in df.columns:
@@ -688,18 +668,17 @@ def _get_impl(force=False):
                 df["total_cargues"] = 0
 
             df["intentos_impl"]    = pd.to_numeric(df.get("intentos_impl", pd.Series(0, index=df.index)), errors="coerce").fillna(0).astype(int)
-            # No filtrar aqui: el dashboard necesita ver R20+ listos para Programacion.
-            # La vista de analista filtra pendientes y bloqueados antes de gestionar.
+            # Solo aliados en rango 7-19 (los de 20+ ya pasaron a Programación)
+            df = df[(df["total_cargues"] >= CARGUES_MIN_IMPL) &
+                    (df["total_cargues"] < CARGUES_META_IMPL)].copy() if len(df) > 0 else df
             df["cargues_faltantes"] = (CARGUES_META_IMPL - df["total_cargues"]).clip(lower=0)
             df["prioridad_impl"]    = df["total_cargues"].apply(_prio_impl)
 
             # FIX: asegurar columna identificacion
             if "identificacion" not in df.columns:
-                for alias_id in ["cedula","id_aliado","id","documento","nro_identificacion","numero_identificacion"]:
+                for alias_id in ["cedula","id_aliado","id","documento"]:
                     if alias_id in df.columns:
                         df["identificacion"] = df[alias_id]; break
-            if "identificacion" in df.columns:
-                df["identificacion"] = df["identificacion"].apply(_norm_id_impl)
 
             st.session_state["impl_df"] = df
         st.session_state["impl_last_load"] = ahora
@@ -710,16 +689,7 @@ def _get_hist_impl(force=False):
     ultima = st.session_state.get("hist_impl_last", 0)
     if force or "hist_impl_df" not in st.session_state or (ahora - ultima) > 30:
         cols = ["fecha","analista","identificacion","resultado","estado","razon","obs","total_cargues_momento"]
-        try:
-            sh = conectar_sheets()
-            if sh:
-                hojas = [ws.title for ws in sh.worksheets()]
-                if "HIST_IMPLEMENTACION" not in hojas:
-                    ws_new = sh.add_worksheet(title="HIST_IMPLEMENTACION", rows=1000, cols=10)
-                    ws_new.append_row(cols)
-            df = leer_hoja("HIST_IMPLEMENTACION", cols)
-        except Exception:
-            df = pd.DataFrame(columns=cols)
+        df   = leer_hoja("HIST_IMPLEMENTACION", cols)
         if df.empty:
             df = pd.DataFrame(columns=cols)
         else:
@@ -746,18 +716,25 @@ def _agregar_hist_impl_local(row):
         st.session_state["hist_impl_df"] = nuevo
     st.session_state["hist_impl_last"] = time.time()
 
-def _get_gestionados_hoy_impl():
-    """Solo gestiones del modulo Implementacion, independiente de Programacion."""
+def _get_gestionados_hoy_todos():
     gestionados = set()
     try:
-        hi = st.session_state.get("hist_impl_df", pd.DataFrame())
-        if not hi.empty and "fecha" in hi.columns:
-            hh = hi.copy()
-            hh["fecha"] = pd.to_datetime(hh["fecha"], errors="coerce")
-            hh = hh.dropna(subset=["fecha"])
-            hoy_h = hh[hh["fecha"].dt.date == now_col().date()]
-            if "identificacion" in hoy_h.columns:
-                gestionados.update(hoy_h["identificacion"].astype(str).tolist())
+        df_g = leer_hoja("GESTIONADOS_HOY")
+        if not df_g.empty:
+            df_g.columns = df_g.columns.str.lower()
+            hoy = str(now_col().date())
+            hoy_g = df_g[df_g["fecha"].astype(str).str.startswith(hoy)]
+            gestionados.update(hoy_g["identificacion"].astype(str).tolist())
+    except Exception:
+        pass
+    try:
+        hist = leer_hoja("HISTORICO")
+        if not hist.empty:
+            hist.columns = hist.columns.str.lower()
+            hist["fecha"] = pd.to_datetime(hist["fecha"], errors="coerce")
+            hist = hist.dropna(subset=["fecha"])
+            hoy_h = hist[hist["fecha"].dt.date == now_col().date()]
+            gestionados.update(hoy_h["identificacion"].astype(str).tolist())
     except Exception:
         pass
     return gestionados
@@ -771,6 +748,11 @@ def guardar_gestion_impl(row):
     ]
     agregar_filas("HIST_IMPLEMENTACION", [fila])
     _agregar_hist_impl_local(row)
+    try:
+        agregar_filas("GESTIONADOS_HOY", [[_safe_str(now_col().date()),
+                                            str(row.get("identificacion","")), "IMPLEMENTACION"]])
+    except Exception:
+        pass
     _actualizar_crm_impl(row.get("identificacion"), row.get("resultado"),
                           row.get("estado"), row.get("razon"), row.get("total_cargues_momento", 0))
 
@@ -783,10 +765,8 @@ def _actualizar_crm_impl(identificacion, resultado, estado, razon, total_cargues
         if "identificacion" not in headers: return
         col_id  = headers.index("identificacion") + 1
         ids     = ws.col_values(col_id)
-        ids_norm = [_norm_id_impl(x) for x in ids]
-        identificacion_norm = _norm_id_impl(identificacion)
-        if identificacion_norm not in ids_norm: return
-        fila    = ids_norm.index(identificacion_norm) + 1
+        if str(identificacion) not in ids: return
+        fila    = ids.index(str(identificacion)) + 1
         intentos_n = 1
         if "intentos_impl" in headers:
             col_int = headers.index("intentos_impl") + 1
@@ -826,13 +806,14 @@ def cargar_base_implementacion(df_nuevo, modo="incremental"):
     """
     df_nuevo = df_nuevo.copy()
     # Normalizar columnas
-    df_nuevo.columns = [_norm_col_impl(c) for c in df_nuevo.columns]
+    df_nuevo.columns = (df_nuevo.columns.str.strip().str.lower()
+                        .str.replace(r"\s+","_",regex=True))
     df_nuevo = df_nuevo[[c for c in df_nuevo.columns
                           if c and not c.startswith("unnamed") and c != "_"]]
     df_nuevo = df_nuevo.loc[:, ~df_nuevo.columns.duplicated()]
 
     # Detectar columna ID con alias ampliados
-    ALIAS_ID = ["identificacion","id_aliado","cedula","id","documento",
+    ALIAS_ID = ["identificacion","id_aliado","id_aliado","cedula","id","documento",
                 "nro_identificacion","numero_identificacion"]
     col_id = next((a for a in ALIAS_ID if a in df_nuevo.columns), None)
     if not col_id:
@@ -842,7 +823,7 @@ def cargar_base_implementacion(df_nuevo, modo="incremental"):
     df_nuevo = df_nuevo.rename(columns={col_id: "identificacion"})
     # Convertir todo a string seguro antes de subir
     df_nuevo = _df_safe_str(df_nuevo)
-    df_nuevo["identificacion"] = df_nuevo["identificacion"].apply(_norm_id_impl)
+    df_nuevo["identificacion"] = df_nuevo["identificacion"].str.strip()
     df_nuevo = df_nuevo.fillna("")
 
     CRM_COLS = ["estado_impl","analista_impl","intentos_impl","proxima_gestion_impl",
@@ -874,7 +855,8 @@ def cargar_base_implementacion(df_nuevo, modo="incremental"):
         return len(df_nuevo), 0, 0
 
     # Normalizar base guardada
-    base.columns = [_norm_col_impl(c) for c in base.columns]
+    base.columns = (base.columns.str.strip().str.lower()
+                    .str.replace(r"\s+","_",regex=True))
     base = base.loc[:, ~base.columns.duplicated()]
     # Alias de ID en base guardada
     if "identificacion" not in base.columns:
@@ -885,7 +867,7 @@ def cargar_base_implementacion(df_nuevo, modo="incremental"):
             st.error("BASE_IMPLEMENTACION no tiene columna de identificación.")
             return 0, 0, 0
     base = _df_safe_str(base)
-    base["identificacion"] = base["identificacion"].apply(_norm_id_impl)
+    base["identificacion"] = base["identificacion"].str.strip()
     base = base.fillna("")
 
     # total_cargues numérico para contar completados
@@ -1427,45 +1409,27 @@ if perfil == "Coordinador":
                     st.plotly_chart(fig_funnel, use_container_width=True)
 
                 with col_barras:
-                    st.markdown("##### Aliados por ruta actual")
-                    ruta_data = []
+                    st.markdown("##### % Churn por tramo (abandono entre rutas)")
+                    churn_data = []
                     for r in range(CARGUES_MIN_IMPL, CARGUES_META_IMPL):
-                        n = len(df_impl_c[df_impl_c["total_cargues"] == r])
-                        ruta_data.append({
-                            "Ruta": f"R{r}",
-                            "Aliados": n,
-                            "Estado": "En seguimiento",
-                        })
-                    n_meta = len(df_impl_c[df_impl_c["total_cargues"] >= CARGUES_META_IMPL])
-                    ruta_data.append({
-                        "Ruta": f"R{CARGUES_META_IMPL}+",
-                        "Aliados": n_meta,
-                        "Estado": "Listos para Programaci?n",
-                    })
-                    df_rutas = pd.DataFrame(ruta_data)
-                    fig_rutas = px.bar(
-                        df_rutas,
-                        x="Ruta",
-                        y="Aliados",
-                        text="Aliados",
-                        color="Estado",
-                        color_discrete_map={
-                            "En seguimiento": "#1976D2",
-                            "Listos para Programaci?n": "#2E7D32",
-                        },
-                        title=f"Distribuci?n de aliados desde R{CARGUES_MIN_IMPL} hasta R{CARGUES_META_IMPL}+"
+                        n_ini = len(df_impl_c[df_impl_c["total_cargues"] == r])
+                        n_sig = len(df_impl_c[df_impl_c["total_cargues"] == r + 1])
+                        pct_ch = round((1 - n_sig/max(n_ini,1))*100, 2) if n_ini > 0 else 0
+                        churn_data.append({"Tramo": f"R{r}→R{r+1}", "% Churn": pct_ch})
+                    df_churn = pd.DataFrame(churn_data)
+                    CHURN_COLORS = ["#C62828","#E53935","#EF9A9A","#FFCC02","#66BB6A"]
+                    fig_churn = px.bar(
+                        df_churn, x="Tramo", y="% Churn",
+                        text="% Churn",
+                        color="Tramo",
+                        color_discrete_sequence=CHURN_COLORS * 3,
+                        title="% Abandono por tramo (R7 → R20)"
                     )
-                    fig_rutas.update_traces(textposition="outside")
-                    fig_rutas.update_layout(
-                        plot_bgcolor="#f8f9fa",
-                        paper_bgcolor="#f8f9fa",
-                        font_color="#333",
-                        yaxis_title="Aliados",
-                        xaxis_title="Ruta actual",
-                        legend_title_text="",
-                    )
-                    st.plotly_chart(fig_rutas, use_container_width=True)
-                    st.dataframe(df_rutas, use_container_width=True, hide_index=True)
+                    fig_churn.update_traces(texttemplate="%{text:.2f}%", textposition="outside")
+                    fig_churn.update_layout(showlegend=False, plot_bgcolor="#f8f9fa",
+                                            paper_bgcolor="#f8f9fa", font_color="#333",
+                                            yaxis_ticksuffix="%")
+                    st.plotly_chart(fig_churn, use_container_width=True)
 
                 # ── Alta prioridad ─────────────────────────────────────────
                 alta_c = df_impl_c[df_impl_c["prioridad_impl"] == "🔴 ALTA"].copy()
@@ -1880,10 +1844,7 @@ if perfil == "Analista":
             with tab_mis_a:
                 # Filtrar por analista si existe la columna
                 if "analista_impl" in df_impl_a.columns:
-                    asignados_a_mi = df_impl_a[
-                        df_impl_a["analista_impl"].astype(str).str.strip() == nombre
-                    ].copy()
-                    mis_a = asignados_a_mi if not asignados_a_mi.empty else df_impl_a.copy()
+                    mis_a = df_impl_a[df_impl_a["analista_impl"].astype(str) == nombre].copy()
                 else:
                     mis_a = df_impl_a.copy()
 
@@ -1899,14 +1860,20 @@ if perfil == "Analista":
                 if "proxima_gestion_impl" in mis_a.columns:
                     mis_a = mis_a[mis_a["proxima_gestion_impl"].apply(disp_impl_a)]
 
-                # Gestionados hoy solo en Implementacion: independiente de Programacion.
-                gestionados_hoy_impl = _get_gestionados_hoy_impl()
+                # Gestionados hoy en CUALQUIER módulo
+                gestionados_hoy_a = _get_gestionados_hoy_todos()
+                if not hist_impl_a.empty:
+                    hh_a = hist_impl_a.copy()
+                    hh_a["fecha"] = pd.to_datetime(hh_a["fecha"], errors="coerce")
+                    hh_a = hh_a.dropna(subset=["fecha"])
+                    ya_impl_hoy_a = set(hh_a[hh_a["fecha"].dt.date == now_col().date()]["identificacion"].astype(str).tolist())
+                    gestionados_hoy_a = gestionados_hoy_a | ya_impl_hoy_a
 
                 # FIX COMPLETO: siempre operar de forma segura sobre mis_a
                 _col_id_ok = "identificacion" in mis_a.columns and not mis_a.empty
                 if _col_id_ok:
                     mis_a = mis_a.copy()
-                    mis_a["_ya_hoy"] = mis_a["identificacion"].astype(str).isin(gestionados_hoy_impl)
+                    mis_a["_ya_hoy"] = mis_a["identificacion"].astype(str).isin(gestionados_hoy_a)
                     pendientes_a = mis_a[~mis_a["_ya_hoy"]].copy()
                     ya_gest_a    = mis_a[mis_a["_ya_hoy"]].copy()
                 else:
@@ -1944,7 +1911,6 @@ if perfil == "Analista":
 
                 st.markdown("---")
                 st.markdown("#### 📞 Registrar gestión")
-                st.info("Los campos de esta gestion son independientes del modulo Programacion.")
                 # FIX: verificar columna identificacion antes de acceder
                 if "identificacion" in pendientes_a.columns:
                     todos_ids_a = pendientes_a["identificacion"].astype(str).tolist()
@@ -1962,7 +1928,7 @@ if perfil == "Analista":
                             ali_ia = st.selectbox("Cédula del aliado", todos_ids_a, key="ali_impl_ana")
                             res_ia = st.selectbox("Resultado de la llamada", RESULTADOS_IMPL, key="res_impl_ana")
                         with ci2:
-                            est_ia = st.selectbox("Estado del aliado", ["-"] + ESTADOS_IMPL, key="est_impl_ana")
+                            est_ia = st.selectbox("Estado", ["-"] + ESTADOS_IMPL, key="est_impl_ana")
                             raz_ia = st.selectbox("Razón", ["-"] + RAZONES_IMPL, key="raz_impl_ana")
 
                         fd_ia = mis_a[mis_a["identificacion"].astype(str) == str(ali_ia)]
@@ -1977,6 +1943,8 @@ if perfil == "Analista":
                             cols_fia = st.columns(min(len(ficha_cols_a), 4))
                             for i, cn in enumerate(ficha_cols_a):
                                 cols_fia[i % 4].metric(cn.replace("_", " ").title(), str(f_ia[cn]))
+                            if str(ali_ia) in gestionados_hoy_a:
+                                st.warning("⚠️ Este aliado ya fue gestionado hoy en otro módulo.")
 
                         obs_ia = st.text_area("Observaciones", key="obs_impl_ana")
                         sub_ia = st.form_submit_button("💾 GUARDAR GESTIÓN IMPLEMENTACIÓN")
@@ -2008,10 +1976,7 @@ if perfil == "Analista":
                 st.subheader("🔍 Buscar aliado en Implementación")
                 cedula_bia = st.text_input("Cédula", "", key="impl_buscar_ana")
                 if cedula_bia.strip():
-                    termino_bia = _norm_id_impl(cedula_bia)
-                    fila_bia = df_impl_a[
-                        df_impl_a["identificacion"].apply(_norm_id_impl) == termino_bia
-                    ]
+                    fila_bia = df_impl_a[df_impl_a["identificacion"].astype(str) == cedula_bia.strip()]
                     if fila_bia.empty:
                         st.warning(f"No se encontró {cedula_bia} en la base de Implementación.")
                     else:
@@ -2031,9 +1996,7 @@ if perfil == "Analista":
                                 st.metric(col.replace("_", " ").title(), str(f_bia[col]))
                         st.markdown("---")
                         if not hist_impl_a.empty:
-                            h_bia = hist_impl_a[
-                                hist_impl_a["identificacion"].apply(_norm_id_impl) == termino_bia
-                            ].copy()
+                            h_bia = hist_impl_a[hist_impl_a["identificacion"].astype(str) == cedula_bia.strip()].copy()
                             if h_bia.empty:
                                 st.info("Sin gestiones en Implementación para este aliado.")
                             else:
