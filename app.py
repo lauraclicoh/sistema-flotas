@@ -228,14 +228,6 @@ def _get_base():
             st.session_state["base_df"] = None
         else:
             df.columns = df.columns.str.strip().str.lower()
-            # Regla operativa global: los aliados inactivos nunca se exponen
-            # a búsqueda, asignación, visualización ni gestión. Al aplicarla
-            # al cargar BASE, todos los procesos que consumen _get_base la
-            # respetan sin duplicar filtros en cada pestaña.
-            if "estado" in df.columns:
-                df = df.loc[
-                    df["estado"].fillna("").astype(str).str.strip().str.casefold() != "inactivo"
-                ].copy()
             if "identificacion" not in df.columns:
                 for a in ["id_aliado","id","cedula","documento"]:
                     if a in df.columns: df["identificacion"] = df[a]; break
@@ -420,14 +412,6 @@ def actualizar_base_crm(identificacion, resultado, estado, razon):
             fila_idx = col_id_vals.index(str(identificacion)) + 1
         except ValueError:
             return
-        # Protección adicional contra llamadas directas: no modificar un
-        # aliado que haya sido marcado como Inactivo en la hoja BASE.
-        estado_header = next((h for h in headers if str(h).strip().casefold() == "estado"), None)
-        if estado_header:
-            estado_actual = ws.cell(fila_idx, headers.index(estado_header) + 1).value
-            if str(estado_actual or "").strip().casefold() == "inactivo":
-                st.warning("El aliado está Inactivo y no puede gestionarse.")
-                return
         intentos_n = 1
         if "intentos" in headers:
             col_int_idx  = headers.index("intentos") + 1
