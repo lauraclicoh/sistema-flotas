@@ -7,7 +7,7 @@ import plotly.express as px
 import time
 from zoneinfo import ZoneInfo
 
-st.set_page_config(layout="wide", page_title="🚚 Gestión Aliados Programación", page_icon="🚚")
+st.set_page_config(layout="wide", page_title="ðŸšš GestiÃ³n Aliados ProgramaciÃ³n", page_icon="ðŸšš")
 
 TZ_COL = ZoneInfo("America/Bogota")
 
@@ -21,19 +21,19 @@ ANALISTAS = {
     "Carlos Andres Loaiza":  "cloaiza@clicoh.com",
 }
 NOMBRES_ANALISTAS = list(ANALISTAS.keys())
-RESULTADOS       = ["Apagado","Fuera de servicio","No contestó","Número errado","Sí contestó"]
+RESULTADOS       = ["Apagado","Fuera de servicio","No contestÃ³","NÃºmero errado","SÃ­ contestÃ³"]
 ESTADOS_FINALES  = [
     "Aliado Rechaza la oferta",
     "Aliado Fleet/Delivery no acepta hub",
     "Interesado llega a cargue",
-    "Interesado esporádico",
+    "Interesado esporÃ¡dico",
     "Empleado",
     "Point",
 ]
 RAZONES = [
     "Interesado carga hoy",
     "No le interesa / cuestiones personales",
-    "No tiene Vh / Vh dañado",
+    "No tiene Vh / Vh daÃ±ado",
     "Peso / Volumen / recorrido",
     "Tarifa",
     "Tiene trabajo fijo",
@@ -43,13 +43,17 @@ RAZONES = [
     "Empleado",
     "Point",
 ]
-NO_RESPONDEN      = ["Apagado","Fuera de servicio","No contestó","Número errado"]
+NO_RESPONDEN      = ["Apagado","Fuera de servicio","No contestÃ³","NÃºmero errado"]
 NO_VOLVER_ESTADOS = ["Aliado Rechaza la oferta","Empleado","Point"]
 NO_VOLVER_RAZONES = ["No le interesa / cuestiones personales"]
 COLS_CRM = ["intentos","ultimo_resultado","ultimo_estado","ultima_razon","fecha_gestion","proxima_gestion"]
 
+# Fuente Ãºnica para la contraseÃ±a de ambos coordinadores. DefÃ­nala como
+# `coordinator_password` en secrets.toml para cambiarla sin duplicar ajustes.
+COORDINATOR_PASSWORD = st.secrets.get("coordinator_password", "clicoh")
+
 def excluir_aliados_inactivos(df: pd.DataFrame) -> pd.DataFrame:
-    """Excluye aliados cuyo Estado en BASE sea Inactivo de toda operación."""
+    """Excluye aliados cuyo Estado en BASE sea Inactivo de toda operaciÃ³n."""
     if df is None or df.empty or "estado" not in df.columns:
         return df
     estado = df["estado"].fillna("").astype(str).str.strip().str.casefold()
@@ -68,7 +72,7 @@ def conectar_sheets():
         )
         return gspread.authorize(creds).open("GestionAliados")
     except Exception as e:
-        st.error(f"Error conexión Sheets: {e}")
+        st.error(f"Error conexiÃ³n Sheets: {e}")
         return None
 
 def _safe_str(val):
@@ -157,15 +161,15 @@ def _norm_vh(v):
     v = str(v).lower()
     if any(k in v for k in ["carry","largenvan","large van","small van","van"]): return "Carry / Van"
     if "moto" in v: return "Moto"
-    if any(k in v for k in ["camion","camión","truck","npr"]): return "Camión"
+    if any(k in v for k in ["camion","camiÃ³n","truck","npr"]): return "CamiÃ³n"
     return str(v).title()
 
 def _prio(dias):
     try: dias = int(float(str(dias)))
-    except: return "🟢 BAJA"
-    if dias > 5: return "🔴 ALTA"
-    if dias > 1: return "🟡 MEDIA"
-    return "🟢 BAJA"
+    except: return "ðŸŸ¢ BAJA"
+    if dias > 5: return "ðŸ”´ ALTA"
+    if dias > 1: return "ðŸŸ¡ MEDIA"
+    return "ðŸŸ¢ BAJA"
 
 def _parse_fecha_cargue(serie: pd.Series) -> pd.Series:
     resultados = []
@@ -186,13 +190,13 @@ def _parse_fecha_cargue(serie: pd.Series) -> pd.Series:
 
 # ================================================================
 # NUEVO: calcular_estado_aliado
-# KPI principal del sistema — calculado automáticamente
+# KPI principal del sistema â€” calculado automÃ¡ticamente
 # Cargando / No ubicable / Deserta
 # ================================================================
 def calcular_estado_aliado(row) -> str:
     """
     Determina el estado operativo del aliado a partir de sus datos CRM.
-    - Deserta   : bloqueado permanente o rechazó/empleado/point
+    - Deserta   : bloqueado permanente o rechazÃ³/empleado/point
     - No ubicable: no contesta repetidamente (en pausa activa por no contacto)
     - Cargando  : tiene actividad de cargue reciente (dias > 0 y <= 30)
     """
@@ -206,25 +210,25 @@ def calcular_estado_aliado(row) -> str:
     try: dias      = int(float(str(row.get("dias", 0))))
     except: pass
 
-    # ── Deserta ─────────────────────────────────────────────
+    # â”€â”€ Deserta â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     if proxima == "NO_VOLVER":
         return "Deserta"
     if ultimo_estado in NO_VOLVER_ESTADOS:
         return "Deserta"
 
-    # ── Cargando ─────────────────────────────────────────────
-    # Tiene cargue reciente (último cargue hace 30 días o menos)
+    # â”€â”€ Cargando â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # Tiene cargue reciente (Ãºltimo cargue hace 30 dÃ­as o menos)
     if 0 < dias <= 30:
         return "Cargando"
 
-    # ── No ubicable ──────────────────────────────────────────
-    # No contesta en varios intentos y está en pausa activa
+    # â”€â”€ No ubicable â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # No contesta en varios intentos y estÃ¡ en pausa activa
     if ultimo_res in NO_RESPONDEN and intentos >= 3:
         f_prox = pd.to_datetime(proxima, errors="coerce")
         if not pd.isna(f_prox) and f_prox > now_col():
             return "No ubicable"
 
-    # Sin gestión previa o caso borde → No ubicable
+    # Sin gestiÃ³n previa o caso borde â†’ No ubicable
     return "No ubicable"
 
 
@@ -250,9 +254,9 @@ def _get_base():
             if "zona" not in df.columns:
                 df["zona"] = "Sin zona"
             # El descarte se realiza al consultar BASE, antes de poblar vistas,
-            # pools, indicadores, búsquedas o asignaciones.
+            # pools, indicadores, bÃºsquedas o asignaciones.
             df = excluir_aliados_inactivos(df)
-            df["vehiculo_norm"] = df["vehiculo"].apply(_norm_vh) if "vehiculo" in df.columns else "Sin vehículo"
+            df["vehiculo_norm"] = df["vehiculo"].apply(_norm_vh) if "vehiculo" in df.columns else "Sin vehÃ­culo"
             df["dias"] = 0
             col_f = next((c for c in ["fecha_ultimo_cargue","fecha ultimo cargue","fechaultimocargue"]
                           if c in df.columns), None)
@@ -267,7 +271,7 @@ def _get_base():
                 if col not in df.columns: df[col] = 0 if col=="intentos" else ""
             df["intentos"] = pd.to_numeric(df["intentos"], errors="coerce").fillna(0).astype(int)
             df = df.loc[:, ~df.columns.duplicated()]
-            # ── NUEVO: calcular estado_aliado al cargar ──────
+            # â”€â”€ NUEVO: calcular estado_aliado al cargar â”€â”€â”€â”€â”€â”€
             df["estado_aliado"] = df.apply(calcular_estado_aliado, axis=1)
             st.session_state["base_df"] = df
         st.session_state["base_stale"] = False
@@ -449,7 +453,7 @@ def actualizar_base_crm(identificacion, resultado, estado, razon):
         if updates:
             ws.batch_update(updates)
         _invalidar_base()
-        # ── NUEVO: actualizar estado_aliado en caché local ──
+        # â”€â”€ NUEVO: actualizar estado_aliado en cachÃ© local â”€â”€
         if "base_df" in st.session_state and st.session_state["base_df"] is not None:
             base_local = st.session_state["base_df"]
             mask = base_local["identificacion"].astype(str) == str(identificacion)
@@ -524,7 +528,7 @@ def procesar_incremental(df_nuevo):
                 "documento", "nro_identificacion", "numero_identificacion"]
     col_id = next((a for a in ALIAS_ID if a in df_nuevo.columns), None)
     if not col_id:
-        st.error(f"No se encontró columna de identificación. Columnas detectadas: {list(df_nuevo.columns)}")
+        st.error(f"No se encontrÃ³ columna de identificaciÃ³n. Columnas detectadas: {list(df_nuevo.columns)}")
         return 0, 0
     df_nuevo = df_nuevo.rename(columns={col_id: "identificacion"})
     df_nuevo = _df_safe_str(df_nuevo)
@@ -546,7 +550,7 @@ def procesar_incremental(df_nuevo):
         if col_id_b:
             base_actual = base_actual.rename(columns={col_id_b: "identificacion"})
         else:
-            st.error("La BASE guardada no tiene columna de identificación.")
+            st.error("La BASE guardada no tiene columna de identificaciÃ³n.")
             return 0, 0
     base_actual["identificacion"] = base_actual["identificacion"].str.strip()
     base_actual = base_actual.fillna("")
@@ -604,43 +608,43 @@ def guardar_reparto(df):
     st.session_state["reparto_stale"] = False
 
 # ================================================================
-# MÓDULO IMPLEMENTACIÓN
+# MÃ“DULO IMPLEMENTACIÃ“N
 # ================================================================
-CARGUES_META_IMPL = 20  # Meta final: pasa a Programación
+CARGUES_META_IMPL = 20  # Meta final: pasa a ProgramaciÃ³n
 CARGUES_MIN_IMPL  = 7   # Los analistas reciben desde el cargue 7
-# Implementación se accede desde el mismo perfil autenticado de Programación;
+# ImplementaciÃ³n se accede desde el mismo perfil autenticado de ProgramaciÃ³n;
 # no conserva credenciales ni usuarios independientes.
 
-RESULTADOS_IMPL = ["Apagado","Fuera de servicio","No contestó","Número errado","Sí contestó"]
+RESULTADOS_IMPL = ["Apagado","Fuera de servicio","No contestÃ³","NÃºmero errado","SÃ­ contestÃ³"]
 ESTADOS_IMPL = [
     "Comprometido a cargar",
     "Interesado pero sin fecha",
     "Necesita seguimiento",
-    "Abandona — tarifa",
-    "Abandona — zona",
-    "Abandona — vehículo averiado",
-    "Abandona — trabaja fijo",
-    "Abandona — no le interesa",
-    "Llegó al 20mo cargue",
+    "Abandona â€” tarifa",
+    "Abandona â€” zona",
+    "Abandona â€” vehÃ­culo averiado",
+    "Abandona â€” trabaja fijo",
+    "Abandona â€” no le interesa",
+    "LlegÃ³ al 20mo cargue",
 ]
 RAZONES_IMPL = [
-    "Tarifa baja","Zona no le conviene","Vehículo averiado","Trabaja fijo",
-    "No disponibilidad de tiempo","Prefiere otra operación","No responde repetidamente","Cargó hoy / sigue activo",
+    "Tarifa baja","Zona no le conviene","VehÃ­culo averiado","Trabaja fijo",
+    "No disponibilidad de tiempo","Prefiere otra operaciÃ³n","No responde repetidamente","CargÃ³ hoy / sigue activo",
 ]
-NO_RESP_IMPL = ["Apagado","Fuera de servicio","No contestó","Número errado"]
+NO_RESP_IMPL = ["Apagado","Fuera de servicio","No contestÃ³","NÃºmero errado"]
 
 def _prio_impl(cargues):
     """
     Prioridad para aliados en rango 7-20 cargues.
-    7-10  → ALTA  (recién llegados, mayor riesgo de abandono)
-    11-15 → MEDIA
-    16-19 → BAJA  (cerca de la meta)
+    7-10  â†’ ALTA  (reciÃ©n llegados, mayor riesgo de abandono)
+    11-15 â†’ MEDIA
+    16-19 â†’ BAJA  (cerca de la meta)
     """
     try: cargues = int(cargues)
-    except: return "🟢 BAJA"
-    if cargues <= 10: return "🔴 ALTA"
-    if cargues <= 15: return "🟡 MEDIA"
-    return "🟢 BAJA"
+    except: return "ðŸŸ¢ BAJA"
+    if cargues <= 10: return "ðŸ”´ ALTA"
+    if cargues <= 15: return "ðŸŸ¡ MEDIA"
+    return "ðŸŸ¢ BAJA"
 
 def calcular_proxima_impl(resultado, estado, intentos):
     hoy = now_col()
@@ -665,19 +669,19 @@ def _get_impl(force=False):
 
             # Evita errores posteriores al operar con una base que no trae ID.
             if "identificacion" not in df.columns:
-                alias_id = ["id_aliado", "id aliado", "id", "cedula", "cédula", "documento",
+                alias_id = ["id_aliado", "id aliado", "id", "cedula", "cÃ©dula", "documento",
                             "nro_identificacion", "numero_identificacion"]
                 col_id = next((col for col in alias_id if col in df.columns), None)
                 if col_id:
                     df = df.rename(columns={col_id: "identificacion"})
                 else:
-                    st.error("BASE_IMPLEMENTACION debe incluir 'identificacion' (o ID, cédula o documento).")
+                    st.error("BASE_IMPLEMENTACION debe incluir 'identificacion' (o ID, cÃ©dula o documento).")
                     st.session_state["impl_df"] = None
                     st.session_state["impl_last_load"] = ahora
                     return None
             df["identificacion"] = df["identificacion"].astype(str).str.strip()
 
-            # FIX zona: alias múltiples
+            # FIX zona: alias mÃºltiples
             if "zona" not in df.columns:
                 for alias_z in ["municipio","ciudad","city"]:
                     if alias_z in df.columns:
@@ -685,11 +689,11 @@ def _get_impl(force=False):
             if "zona" not in df.columns:
                 df["zona"] = "Sin zona"
 
-            # FIX vehiculo: alias múltiples
+            # FIX vehiculo: alias mÃºltiples
             vh_col = next((c for c in ["vehiculo","tipo_vehiculo","vehicle","tipo_vh"] if c in df.columns), None)
-            df["vehiculo_norm"] = df[vh_col].apply(_norm_vh) if vh_col else "Sin vehículo"
+            df["vehiculo_norm"] = df[vh_col].apply(_norm_vh) if vh_col else "Sin vehÃ­culo"
 
-            # FIX total_cargues: alias múltiples
+            # FIX total_cargues: alias mÃºltiples
             tc_col = next((c for c in ["total_cargues","cargues","num_cargues","cargues_totales"] if c in df.columns), None)
             if tc_col:
                 df["total_cargues"] = pd.to_numeric(df[tc_col], errors="coerce").fillna(0).astype(int)
@@ -697,7 +701,7 @@ def _get_impl(force=False):
                 df["total_cargues"] = 0
 
             df["intentos_impl"]    = pd.to_numeric(df.get("intentos_impl", pd.Series(0, index=df.index)), errors="coerce").fillna(0).astype(int)
-            # Solo aliados en rango 7-19 (los de 20+ ya pasaron a Programación)
+            # Solo aliados en rango 7-19 (los de 20+ ya pasaron a ProgramaciÃ³n)
             df = df[(df["total_cargues"] >= CARGUES_MIN_IMPL) &
                     (df["total_cargues"] < CARGUES_META_IMPL)].copy() if len(df) > 0 else df
             df["cargues_faltantes"] = (CARGUES_META_IMPL - df["total_cargues"]).clip(lower=0)
@@ -804,8 +808,8 @@ def _actualizar_crm_impl(identificacion, resultado, estado, razon, total_cargues
             except: intentos_n = 1
         proxima = calcular_proxima_impl(resultado, estado, intentos_n)
         proxima_str = _safe_str(proxima) if not isinstance(proxima, str) else proxima
-        estado_pipeline = "Completó 20 cargues — Pasa a Programación" if (
-            str(estado) == "Llegó al 20mo cargue" or int(total_cargues or 0) >= CARGUES_META_IMPL
+        estado_pipeline = "CompletÃ³ 20 cargues â€” Pasa a ProgramaciÃ³n" if (
+            str(estado) == "LlegÃ³ al 20mo cargue" or int(total_cargues or 0) >= CARGUES_META_IMPL
         ) else str(estado or "")
         updates = []
         for col_name, val in [
@@ -825,11 +829,11 @@ def _actualizar_crm_impl(identificacion, resultado, estado, razon, total_cargues
         if "impl_df" in st.session_state:
             del st.session_state["impl_df"]
     except Exception as e:
-        st.warning(f"CRM Implementación no actualizado: {e}")
+        st.warning(f"CRM ImplementaciÃ³n no actualizado: {e}")
 
 def cargar_base_implementacion(df_nuevo, modo="incremental"):
     """
-    Carga base de Implementación.
+    Carga base de ImplementaciÃ³n.
     modo='incremental': conserva CRM de existentes, agrega nuevos.
     modo='reemplazar': borra todo y sube desde cero.
     """
@@ -846,7 +850,7 @@ def cargar_base_implementacion(df_nuevo, modo="incremental"):
                 "nro_identificacion","numero_identificacion"]
     col_id = next((a for a in ALIAS_ID if a in df_nuevo.columns), None)
     if not col_id:
-        st.error(f"No se encontró columna de ID. Columnas detectadas: {list(df_nuevo.columns)}")
+        st.error(f"No se encontrÃ³ columna de ID. Columnas detectadas: {list(df_nuevo.columns)}")
         return 0, 0, 0
 
     df_nuevo = df_nuevo.rename(columns={col_id: "identificacion"})
@@ -858,7 +862,7 @@ def cargar_base_implementacion(df_nuevo, modo="incremental"):
     CRM_COLS = ["estado_impl","analista_impl","intentos_impl","proxima_gestion_impl",
                 "ultimo_resultado_impl","ultimo_estado_impl","ultima_razon_impl","fecha_ingreso_impl"]
 
-    # ── Modo REEMPLAZAR ──────────────────────────────────────────────────────
+    # â”€â”€ Modo REEMPLAZAR â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     if modo == "reemplazar":
         for col in CRM_COLS:
             if col not in df_nuevo.columns:
@@ -869,7 +873,7 @@ def cargar_base_implementacion(df_nuevo, modo="incremental"):
         if "impl_df" in st.session_state: del st.session_state["impl_df"]
         return len(df_nuevo), 0, 0
 
-    # ── Modo INCREMENTAL ─────────────────────────────────────────────────────
+    # â”€â”€ Modo INCREMENTAL â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     base = leer_hoja("BASE_IMPLEMENTACION")
 
     if base.empty:
@@ -893,13 +897,13 @@ def cargar_base_implementacion(df_nuevo, modo="incremental"):
         if col_id_b:
             base = base.rename(columns={col_id_b: "identificacion"})
         else:
-            st.error("BASE_IMPLEMENTACION no tiene columna de identificación.")
+            st.error("BASE_IMPLEMENTACION no tiene columna de identificaciÃ³n.")
             return 0, 0, 0
     base = _df_safe_str(base)
     base["identificacion"] = base["identificacion"].str.strip()
     base = base.fillna("")
 
-    # total_cargues numérico para contar completados
+    # total_cargues numÃ©rico para contar completados
     if "total_cargues" not in base.columns:
         base["total_cargues"] = "0"
 
@@ -913,7 +917,7 @@ def cargar_base_implementacion(df_nuevo, modo="incremental"):
     nuevos["fecha_ingreso_impl"] = _safe_str(now_col())
     nuevos = nuevos.fillna("")
 
-    # Actualizar existentes — SOLO columnas operativas (no CRM)
+    # Actualizar existentes â€” SOLO columnas operativas (no CRM)
     cols_op = [c for c in df_nuevo.columns if c not in CRM_COLS and c != "identificacion"]
     existentes_mask = df_nuevo["identificacion"].isin(ids_existentes)
     cols_sel = ["identificacion"] + cols_op
@@ -942,7 +946,7 @@ def cargar_base_implementacion(df_nuevo, modo="incremental"):
     base_final = base_final.fillna("")
     base_final = base_final.loc[:, ~base_final.columns.duplicated()]
 
-    # Última conversión segura antes de subir
+    # Ãšltima conversiÃ³n segura antes de subir
     base_final = _df_safe_str(base_final)
 
     reemplazar_hoja("BASE_IMPLEMENTACION", base_final)
@@ -952,36 +956,54 @@ def cargar_base_implementacion(df_nuevo, modo="incremental"):
 # ================================================================
 # HELPER VISUAL: badge estado_aliado
 # ================================================================
-ESTADO_EMOJI = {"Cargando": "🟢", "No ubicable": "🟡", "Deserta": "🔴"}
+ESTADO_EMOJI = {"Cargando": "ðŸŸ¢", "No ubicable": "ðŸŸ¡", "Deserta": "ðŸ”´"}
 
 def _badge_estado(estado: str) -> str:
     """Retorna texto con emoji para mostrar en tablas."""
-    return f"{ESTADO_EMOJI.get(estado,'⚪')} {estado}"
+    return f"{ESTADO_EMOJI.get(estado,'âšª')} {estado}"
 
 # ================================================================
 # UI
 # ================================================================
-st.title("🚚 Gestión Aliados Programación")
+st.title("ðŸšš GestiÃ³n Aliados ProgramaciÃ³n")
 
 with st.sidebar:
-    st.markdown("### 👤 Acceso")
-    perfil = st.selectbox("Soy:", ["— Selecciona —","Coordinador","Analista"])
+  st.markdown("### ðŸ‘¤ Acceso")
+  perfil = st.selectbox("Soy:", ["â€” Selecciona â€”","Coordinador","Analista","ImplementaciÃ³n"])
 
-    if perfil == "Coordinador":
-        pwd = st.text_input("Contraseña", type="password")
-        if pwd != "clicoh":
-            if pwd: st.error("Contraseña incorrecta")
-            st.stop()
-        st.success("✅ Coordinador")
-        nombre = "Coordinador"
+  if perfil == "Coordinador":
+      pwd = st.text_input("ContraseÃ±a", type="password")
+      if pwd != COORDINATOR_PASSWORD:
+          if pwd: st.error("Contraseña incorrecta")
+          st.stop()
+      st.success("✅ Coordinador")
+      nombre = "Coordinador"
 
-    elif perfil == "Analista":
-        nombre = st.selectbox("¿Quién eres?", NOMBRES_ANALISTAS)
-        st.success(f"✅ {nombre.split()[0]}")
+  elif perfil == "Analista":
+      nombre = st.selectbox("Â¿QuiÃ©n eres?", NOMBRES_ANALISTAS)
+      st.success(f"âœ… {nombre.split()[0]}")
 
-    else:
-        st.info("Selecciona tu perfil para continuar.")
-        st.stop()
+  elif perfil == "ImplementaciÃ³n":
+      rol_impl = st.selectbox("Rol", ["â€” Selecciona â€”", "Coordinador", "Analista"], key="rol_impl_separado")
+      if rol_impl == "Coordinador":
+          pwd_impl = st.text_input("ContraseÃ±a de coordinador", type="password", key="pwd_impl_separado")
+          if pwd_impl != COORDINATOR_PASSWORD:
+              if pwd_impl: st.error("ContraseÃ±a incorrecta")
+              st.stop()
+          nombre = "Coordinador"
+          es_coord_impl = True
+          st.success("âœ… Coordinador ImplementaciÃ³n")
+      elif rol_impl == "Analista":
+          nombre = st.selectbox("Â¿QuiÃ©n eres?", NOMBRES_ANALISTAS, key="analista_impl_separado")
+          es_coord_impl = False
+          st.success(f"âœ… {nombre.split()[0]}")
+      else:
+          st.info("Selecciona tu rol para continuar.")
+          st.stop()
+
+  else:
+      st.info("Selecciona tu perfil para continuar.")
+      st.stop()
 
 # ================================================================
 # COORDINADOR
@@ -991,27 +1013,27 @@ if perfil == "Coordinador":
     hist = _get_hist()
 
     tab1,tab2,tab3,tab4,tab5,tab6,tab7,tab8,tab9 = st.tabs([
-        "📊 Hoy","📅 Histórico & KPIs","🔍 Buscar Aliado",
-        "🔥 Estado CRM","📤 Cargar Base","🎯 Asignación","⚙️ Reglas","🗺️ Cobertura por Zona",
-        "⚙️ Implementación",
+        "ðŸ“Š Hoy","ðŸ“… HistÃ³rico & KPIs","ðŸ” Buscar Aliado",
+        "ðŸ”¥ Estado CRM","ðŸ“¤ Cargar Base","ðŸŽ¯ AsignaciÃ³n","âš™ï¸ Reglas","ðŸ—ºï¸ Cobertura por Zona",
+        "âš™ï¸ ImplementaciÃ³n",
     ])
 
     with tab1:
-        st.subheader("Auditoría de Gestión")
-        if st.button("🔄 Actualizar gestiones", key="btn_ref_hoy"):
+        st.subheader("AuditorÃ­a de GestiÃ³n")
+        if st.button("ðŸ”„ Actualizar gestiones", key="btn_ref_hoy"):
             hist = _get_hist(force_reload=True)
             st.rerun()
         if hist.empty:
-            st.info("Sin gestiones registradas aún.")
+            st.info("Sin gestiones registradas aÃºn.")
         else:
             hv = hist.dropna(subset=["fecha"])
             col_fd, col_bt = st.columns([3,1])
             with col_fd:
                 valor_fecha = (now_col().date() if st.session_state.pop("_reset_fecha_aud", False) else now_col().date())
-                fecha_aud = st.date_input("📅 Fecha a auditar", value=valor_fecha, max_value=now_col().date(), key="coord_fecha_aud")
+                fecha_aud = st.date_input("ðŸ“… Fecha a auditar", value=valor_fecha, max_value=now_col().date(), key="coord_fecha_aud")
             with col_bt:
                 st.markdown("<br>", unsafe_allow_html=True)
-                if st.button("📅 Hoy"):
+                if st.button("ðŸ“… Hoy"):
                     st.session_state["_reset_fecha_aud"] = True
                     st.rerun()
             hf = hv[hv["fecha"].dt.date==fecha_aud].sort_values("fecha",ascending=False)
@@ -1019,41 +1041,41 @@ if perfil == "Coordinador":
                 st.warning(f"Sin gestiones el {fecha_aud.strftime('%d/%m/%Y')}.")
             else:
                 label = "hoy" if fecha_aud==now_col().date() else fecha_aud.strftime("%d/%m/%Y")
-                t=len(hf); sc=len(hf[hf["resultado"]=="Sí contestó"])
+                t=len(hf); sc=len(hf[hf["resultado"]=="SÃ­ contestÃ³"])
                 it=len(hf[hf["estado"]=="Interesado llega a cargue"])
                 rc=len(hf[hf["estado"]=="Aliado Rechaza la oferta"])
                 nr=len(hf[hf["resultado"].isin(NO_RESPONDEN)])
                 c1,c2,c3,c4,c5=st.columns(5)
-                c1.metric("📞 Llamadas",t); c2.metric("✅ Contactados",sc)
-                c3.metric("🚗 Interesados",it); c4.metric("❌ Rechazados",rc); c5.metric("📵 No resp.",nr)
+                c1.metric("ðŸ“ž Llamadas",t); c2.metric("âœ… Contactados",sc)
+                c3.metric("ðŸš— Interesados",it); c4.metric("âŒ Rechazados",rc); c5.metric("ðŸ“µ No resp.",nr)
                 st.markdown("---")
                 prod=hf.groupby("analista").size().reset_index(name="llamadas")
                 ia=(hf[hf["estado"]=="Interesado llega a cargue"].groupby("analista").size().reset_index(name="interesados"))
                 tp=prod.merge(ia,on="analista",how="left").fillna(0)
                 tp["interesados"]=tp["interesados"].astype(int)
                 tp["% efectividad"]=(tp["interesados"]/tp["llamadas"]*100).round(1)
-                tp["🚦"]=tp.apply(lambda r:"🟢" if r["llamadas"]>=30 and r["interesados"]>=3 else("🟡" if r["llamadas"]>=15 else "🔴"),axis=1)
+                tp["ðŸš¦"]=tp.apply(lambda r:"ðŸŸ¢" if r["llamadas"]>=30 and r["interesados"]>=3 else("ðŸŸ¡" if r["llamadas"]>=15 else "ðŸ”´"),axis=1)
                 st.dataframe(tp,use_container_width=True,hide_index=True)
-                st.plotly_chart(px.bar(tp,x="analista",y="llamadas",color="% efectividad",title=f"Llamadas — {label}"),use_container_width=True)
+                st.plotly_chart(px.bar(tp,x="analista",y="llamadas",color="% efectividad",title=f"Llamadas â€” {label}"),use_container_width=True)
                 st.markdown("---")
                 fa,fr,fb=st.columns(3)
                 with fa: af=st.multiselect("Analista",NOMBRES_ANALISTAS,default=NOMBRES_ANALISTAS,key="af_c")
                 with fr: rf=st.multiselect("Resultado",RESULTADOS,default=RESULTADOS,key="rf_c")
-                with fb: bus=st.text_input("Buscar cédula","",key="bus_c")
+                with fb: bus=st.text_input("Buscar cÃ©dula","",key="bus_c")
                 df_f=hf[hf["analista"].isin(af)&hf["resultado"].isin(rf)]
                 if bus: df_f=df_f[df_f["identificacion"].astype(str).str.contains(bus,na=False)]
                 df_show=df_f.copy(); df_show["Hora"]=df_show["fecha"].dt.strftime("%I:%M %p")
                 st.dataframe(df_show[["Hora","analista","identificacion","resultado","estado","razon","obs"]].rename(
-                    columns={"analista":"Analista","identificacion":"Cédula","resultado":"Resultado","estado":"Estado","razon":"Razón","obs":"Obs"}
+                    columns={"analista":"Analista","identificacion":"CÃ©dula","resultado":"Resultado","estado":"Estado","razon":"RazÃ³n","obs":"Obs"}
                 ),use_container_width=True,hide_index=True)
-                st.download_button("📥 Descargar día (CSV)",df_f.to_csv(index=False).encode("utf-8"),f"gestion_{fecha_aud}.csv","text/csv")
+                st.download_button("ðŸ“¥ Descargar dÃ­a (CSV)",df_f.to_csv(index=False).encode("utf-8"),f"gestion_{fecha_aud}.csv","text/csv")
 
     with tab2:
-        st.subheader("Histórico & KPIs")
-        if st.button("🔄 Actualizar historial", key="btn_ref_hist"):
+        st.subheader("HistÃ³rico & KPIs")
+        if st.button("ðŸ”„ Actualizar historial", key="btn_ref_hist"):
             hist = _get_hist(force_reload=True); st.rerun()
         if hist.empty:
-            st.info("Sin historial aún.")
+            st.info("Sin historial aÃºn.")
         else:
             hv2=hist.dropna(subset=["fecha"])
             c1,c2=st.columns(2)
@@ -1063,12 +1085,12 @@ if perfil == "Coordinador":
             if d.empty:
                 st.warning("Sin registros en ese rango.")
             else:
-                tot=len(d); sr=d[d["resultado"]=="Sí contestó"]; nr=d[d["resultado"].isin(NO_RESPONDEN)]
+                tot=len(d); sr=d[d["resultado"]=="SÃ­ contestÃ³"]; nr=d[d["resultado"].isin(NO_RESPONDEN)]
                 g=len(sr); it=len(d[d["estado"]=="Interesado llega a cargue"]); rc=len(d[d["estado"]=="Aliado Rechaza la oferta"])
                 c1,c2,c3,c4,c5=st.columns(5)
-                c1.metric("📞 Total",tot); c2.metric("✅ Contactados",g)
+                c1.metric("ðŸ“ž Total",tot); c2.metric("âœ… Contactados",g)
                 c3.metric("% No resp",f"{round(len(nr)/tot*100,1) if tot else 0}%")
-                c4.metric("% Gestión",f"{round(g/tot*100,1) if tot else 0}%")
+                c4.metric("% GestiÃ³n",f"{round(g/tot*100,1) if tot else 0}%")
                 c5.metric("% Interesados",f"{round(it/tot*100,1) if tot else 0}%")
                 c6,c7=st.columns(2)
                 c6.metric("% Rechazados",f"{round(rc/tot*100,1) if tot else 0}%")
@@ -1082,10 +1104,10 @@ if perfil == "Coordinador":
                 de=[[e,len(sr[sr["estado"]==e]),round(len(sr[sr["estado"]==e])/g*100,1) if g else 0] for e in ESTADOS_FINALES]
                 st.markdown("#### Estado final"); st.dataframe(pd.DataFrame(de,columns=["Estado","N","%"]),use_container_width=True)
                 dr=[[r,len(sr[sr["razon"]==r]),round(len(sr[sr["razon"]==r])/g*100,1) if g else 0] for r in RAZONES]
-                st.markdown("#### Razones"); st.dataframe(pd.DataFrame(dr,columns=["Razón","N","%"]),use_container_width=True)
+                st.markdown("#### Razones"); st.dataframe(pd.DataFrame(dr,columns=["RazÃ³n","N","%"]),use_container_width=True)
                 st.markdown("---"); st.markdown("#### KPIs por analista")
                 pa=d.groupby("analista").size().reset_index(name="llamadas")
-                ga=d[d["resultado"]=="Sí contestó"].groupby("analista").size().reset_index(name="gest")
+                ga=d[d["resultado"]=="SÃ­ contestÃ³"].groupby("analista").size().reset_index(name="gest")
                 ia=d[d["estado"]=="Interesado llega a cargue"].groupby("analista").size().reset_index(name="inter")
                 ra=d[d["estado"]=="Aliado Rechaza la oferta"].groupby("analista").size().reset_index(name="rech")
                 na=d[d["resultado"].isin(NO_RESPONDEN)].groupby("analista").size().reset_index(name="noresp")
@@ -1107,13 +1129,13 @@ if perfil == "Coordinador":
                 for extra in ["vehiculo","municipio","zona"]:
                     if extra in d_show.columns: cols_hist.append(extra)
                 cols_hist.append("obs")
-                st.dataframe(d_show[cols_hist].rename(columns={"analista":"Analista","identificacion":"Cédula","resultado":"Resultado",
-                    "estado":"Estado","razon":"Razón","vehiculo":"Vehículo","municipio":"Ciudad","zona":"Zona","obs":"Obs"}),use_container_width=True,hide_index=True)
-                st.download_button("📥 Descargar (CSV)",d_show.to_csv(index=False).encode("utf-8"),f"historico_{f1}_{f2}.csv","text/csv")
+                st.dataframe(d_show[cols_hist].rename(columns={"analista":"Analista","identificacion":"CÃ©dula","resultado":"Resultado",
+                    "estado":"Estado","razon":"RazÃ³n","vehiculo":"VehÃ­culo","municipio":"Ciudad","zona":"Zona","obs":"Obs"}),use_container_width=True,hide_index=True)
+                st.download_button("ðŸ“¥ Descargar (CSV)",d_show.to_csv(index=False).encode("utf-8"),f"historico_{f1}_{f2}.csv","text/csv")
 
     with tab3:
-        st.subheader("🔍 Buscar Aliado por Cédula o Teléfono")
-        cedula_buscar = st.text_input("Ingresa la cédula o teléfono", "", key="busq_cedula")
+        st.subheader("ðŸ” Buscar Aliado por CÃ©dula o TelÃ©fono")
+        cedula_buscar = st.text_input("Ingresa la cÃ©dula o telÃ©fono", "", key="busq_cedula")
         if cedula_buscar.strip() and base is not None:
             termino_c = cedula_buscar.strip()
             resultado_b = base[base["identificacion"].astype(str) == termino_c]
@@ -1121,9 +1143,9 @@ if perfil == "Coordinador":
                 resultado_b = base[base["celular"].astype(str).str.replace(r"\D","",regex=True) ==
                                    termino_c.replace(" ","")]
             if resultado_b.empty:
-                st.warning(f"No se encontró ningún aliado con cédula **{cedula_buscar}**.")
+                st.warning(f"No se encontrÃ³ ningÃºn aliado con cÃ©dula **{cedula_buscar}**.")
             else:
-                fila_b = resultado_b.iloc[0]; st.success("✅ Aliado encontrado")
+                fila_b = resultado_b.iloc[0]; st.success("âœ… Aliado encontrado")
                 cols_info = [c for c in ["identificacion","mensajero","celular","correo","zona","municipio",
                                           "vehiculo","categoria","estado_aliado",
                                           "dias","intentos","ultimo_resultado","ultimo_estado","proxima_gestion"]
@@ -1133,25 +1155,25 @@ if perfil == "Coordinador":
                     for col in cols_info[:mitad]: st.metric(col.replace("_"," ").title(), str(fila_b[col]))
                 with c2:
                     for col in cols_info[mitad:]: st.metric(col.replace("_"," ").title(), str(fila_b[col]))
-                st.markdown("---"); st.markdown("#### 📋 Historial de gestiones")
+                st.markdown("---"); st.markdown("#### ðŸ“‹ Historial de gestiones")
                 hist_aliado = hist[hist["identificacion"].astype(str)==cedula_buscar.strip()].copy()
                 if hist_aliado.empty:
                     st.info("Sin gestiones registradas para este aliado.")
                 else:
                     hist_aliado["Hora"] = hist_aliado["fecha"].dt.strftime("%d/%m/%Y %I:%M %p")
                     st.dataframe(hist_aliado[["Hora","analista","resultado","estado","razon","obs"]].rename(
-                        columns={"analista":"Analista","resultado":"Resultado","estado":"Estado","razon":"Razón","obs":"Obs"}
+                        columns={"analista":"Analista","resultado":"Resultado","estado":"Estado","razon":"RazÃ³n","obs":"Obs"}
                     ),use_container_width=True,hide_index=True)
         elif cedula_buscar.strip() and base is None:
             st.warning("Carga la base primero.")
 
-    # ── TAB 4: ESTADO CRM — NUEVO BLOQUE DE ESTADO_ALIADO ──────────────────
+    # â”€â”€ TAB 4: ESTADO CRM â€” NUEVO BLOQUE DE ESTADO_ALIADO â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     with tab4:
         if base is None:
             st.warning("Carga la base primero.")
         else:
-            # ── KPI PRINCIPAL: ESTADO ALIADO ─────────────────────────────────
-            st.markdown("### 🎯 Estado Aliado — KPI Principal")
+            # â”€â”€ KPI PRINCIPAL: ESTADO ALIADO â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+            st.markdown("### ðŸŽ¯ Estado Aliado â€” KPI Principal")
             n_cargando  = len(base[base["estado_aliado"] == "Cargando"])
             n_no_ubic   = len(base[base["estado_aliado"] == "No ubicable"])
             n_deserta   = len(base[base["estado_aliado"] == "Deserta"])
@@ -1162,11 +1184,11 @@ if perfil == "Coordinador":
 
             # Cards grandes con color
             ea1, ea2, ea3 = st.columns(3)
-            ea1.metric("🟢 Cargando",    f"{n_cargando:,}", f"{pct_carg}% del total")
-            ea2.metric("🟡 No ubicable", f"{n_no_ubic:,}",  f"{pct_noub}% del total")
-            ea3.metric("🔴 Deserta",     f"{n_deserta:,}",  f"{pct_des}% del total", delta_color="inverse")
+            ea1.metric("ðŸŸ¢ Cargando",    f"{n_cargando:,}", f"{pct_carg}% del total")
+            ea2.metric("ðŸŸ¡ No ubicable", f"{n_no_ubic:,}",  f"{pct_noub}% del total")
+            ea3.metric("ðŸ”´ Deserta",     f"{n_deserta:,}",  f"{pct_des}% del total", delta_color="inverse")
 
-            # Gráfico de distribución de estado_aliado
+            # GrÃ¡fico de distribuciÃ³n de estado_aliado
             st.markdown("---")
             df_estados = base["estado_aliado"].value_counts().reset_index()
             df_estados.columns = ["Estado", "Aliados"]
@@ -1174,7 +1196,7 @@ if perfil == "Coordinador":
                 df_estados, x="Estado", y="Aliados",
                 color="Estado",
                 color_discrete_map={"Cargando":"#639922","No ubicable":"#BA7517","Deserta":"#A32D2D"},
-                title="Distribución de Estado Aliado en la base completa",
+                title="DistribuciÃ³n de Estado Aliado en la base completa",
             )
             fig_est.update_layout(showlegend=False)
             st.plotly_chart(fig_est, use_container_width=True)
@@ -1184,7 +1206,7 @@ if perfil == "Coordinador":
             st.markdown("#### Detalle por estado")
             estado_sel = st.selectbox(
                 "Ver aliados en estado:",
-                ["Todos","🟢 Cargando","🟡 No ubicable","🔴 Deserta"],
+                ["Todos","ðŸŸ¢ Cargando","ðŸŸ¡ No ubicable","ðŸ”´ Deserta"],
                 key="sel_estado_crm"
             )
             base_filtrada = base.copy()
@@ -1205,7 +1227,7 @@ if perfil == "Coordinador":
             st.caption(f"Mostrando {len(base_show):,} aliados")
             st.dataframe(base_show, use_container_width=True, hide_index=True)
 
-            # ── CRM clásico debajo ───────────────────────────────────────────
+            # â”€â”€ CRM clÃ¡sico debajo â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
             st.markdown("---")
             st.markdown("#### Vista CRM detallada")
             nv=base[base["proxima_gestion"].astype(str).str.upper()=="NO_VOLVER"]; disp=filtrar_pool(base)
@@ -1216,48 +1238,48 @@ if perfil == "Coordinador":
                 return not pd.isna(f) and f>now_col()
             paus=base[base["proxima_gestion"].apply(en_pausa_fn)]
             c1,c2,c3,c4=st.columns(4)
-            c1.metric("📦 Total",len(base)); c2.metric("✅ Disponibles",len(disp))
-            c3.metric("⏸ En pausa",len(paus)); c4.metric("🚫 Bloqueados",len(nv))
+            c1.metric("ðŸ“¦ Total",len(base)); c2.metric("âœ… Disponibles",len(disp))
+            c3.metric("â¸ En pausa",len(paus)); c4.metric("ðŸš« Bloqueados",len(nv))
             st.markdown("---")
             disp2=disp.copy(); disp2["PRIORIDAD"]=disp2["dias"].apply(_prio)
             c1,c2,c3=st.columns(3)
-            c1.metric("🔴 ALTA",len(disp2[disp2["PRIORIDAD"]=="🔴 ALTA"]))
-            c2.metric("🟡 MEDIA",len(disp2[disp2["PRIORIDAD"]=="🟡 MEDIA"]))
-            c3.metric("🟢 BAJA",len(disp2[disp2["PRIORIDAD"]=="🟢 BAJA"]))
+            c1.metric("ðŸ”´ ALTA",len(disp2[disp2["PRIORIDAD"]=="ðŸ”´ ALTA"]))
+            c2.metric("ðŸŸ¡ MEDIA",len(disp2[disp2["PRIORIDAD"]=="ðŸŸ¡ MEDIA"]))
+            c3.metric("ðŸŸ¢ BAJA",len(disp2[disp2["PRIORIDAD"]=="ðŸŸ¢ BAJA"]))
             if not paus.empty:
-                st.markdown("---"); st.markdown("#### ⏸ En pausa / recontacto programado")
+                st.markdown("---"); st.markdown("#### â¸ En pausa / recontacto programado")
                 cp=[c for c in ["identificacion","mensajero","celular","zona","vehiculo","intentos","ultimo_resultado","ultimo_estado","proxima_gestion"] if c in paus.columns]
                 st.dataframe(paus[cp].sort_values("proxima_gestion"),use_container_width=True)
             if not nv.empty:
-                st.markdown("---"); st.markdown("#### 🚫 Bloqueados permanentemente")
+                st.markdown("---"); st.markdown("#### ðŸš« Bloqueados permanentemente")
                 cnv=[c for c in ["identificacion","mensajero","celular","ultimo_estado","ultima_razon"] if c in nv.columns]
                 st.dataframe(nv[cnv],use_container_width=True)
 
     with tab5:
-        st.subheader("📤 Carga de Base")
+        st.subheader("ðŸ“¤ Carga de Base")
         st.info("La base permanece en Google Sheets indefinidamente. Usa Incremental para conservar el historial CRM.")
-        modo=st.radio("Modo de carga",["🔄 Incremental (recomendado) — conserva historial CRM","♻️ Reemplazar toda la base — borra historial CRM"])
+        modo=st.radio("Modo de carga",["ðŸ”„ Incremental (recomendado) â€” conserva historial CRM","â™»ï¸ Reemplazar toda la base â€” borra historial CRM"])
         archivo=st.file_uploader("Excel (.xlsx)",type=["xlsx"])
         if archivo:
             try:
                 df_s = pd.read_excel(archivo, engine="openpyxl")
                 df_s = df_s[[c for c in df_s.columns if not str(c).startswith("Unnamed")]]
                 df_s = _df_safe_str(df_s); df_s = df_s.fillna("")
-                st.success(f"{len(df_s):,} registros leídos"); st.dataframe(df_s.head(5),use_container_width=True)
+                st.success(f"{len(df_s):,} registros leÃ­dos"); st.dataframe(df_s.head(5),use_container_width=True)
                 if "Incremental" in modo:
-                    if st.button("🚀 Ejecutar Cruce Incremental"):
+                    if st.button("ðŸš€ Ejecutar Cruce Incremental"):
                         with st.spinner("Procesando cruce..."):
                             nn,na=procesar_incremental(df_s)
-                        st.success(f"✅ {nn} aliados nuevos añadidos · {na} aliados actualizados")
+                        st.success(f"âœ… {nn} aliados nuevos aÃ±adidos Â· {na} aliados actualizados")
                 else:
-                    st.warning("⚠️ Esto borrará TODA la base actual incluyendo el historial CRM.")
-                    confirmar=st.checkbox("Entiendo que se borrará todo el historial CRM")
-                    if confirmar and st.button("♻️ Reemplazar base completa"):
+                    st.warning("âš ï¸ Esto borrarÃ¡ TODA la base actual incluyendo el historial CRM.")
+                    confirmar=st.checkbox("Entiendo que se borrarÃ¡ todo el historial CRM")
+                    if confirmar and st.button("â™»ï¸ Reemplazar base completa"):
                         with st.spinner("Subiendo..."):
                             base_operable = excluir_aliados_inactivos(df_s)
                             excluidos = len(df_s) - len(base_operable)
                             reemplazar_hoja("BASE", base_operable); _invalidar_base()
-                        st.success(f"✅ {len(base_operable):,} aliados subidos · {excluidos:,} inactivos excluidos.")
+                        st.success(f"âœ… {len(base_operable):,} aliados subidos Â· {excluidos:,} inactivos excluidos.")
             except Exception as e:
                 st.error(f"Error leyendo el archivo: {e}")
         if base is not None:
@@ -1268,66 +1290,66 @@ if perfil == "Coordinador":
             st.warning("Carga la base primero.")
         else:
             zonas=sorted(base["zona"].dropna().unique()); vhs=sorted(base["vehiculo_norm"].dropna().unique())
-            modo_a=st.selectbox("Modo",["Analista decide","Asignación general (todos igual)","Asignación por analista"])
+            modo_a=st.selectbox("Modo",["Analista decide","AsignaciÃ³n general (todos igual)","AsignaciÃ³n por analista"])
             dc=[]
-            if modo_a=="Asignación general (todos igual)":
-                zg=st.selectbox("Zona",zonas); vg=st.selectbox("Vehículo",vhs)
+            if modo_a=="AsignaciÃ³n general (todos igual)":
+                zg=st.selectbox("Zona",zonas); vg=st.selectbox("VehÃ­culo",vhs)
                 dc=[{"analista":"TODOS","modo":modo_a,"zona":zg,"vehiculo":vg}]
-            elif modo_a=="Asignación por analista":
+            elif modo_a=="AsignaciÃ³n por analista":
                 for a in NOMBRES_ANALISTAS:
                     st.markdown(f"**{a}**"); col1,col2=st.columns(2)
                     with col1: z=st.selectbox("Zona",zonas,key=f"z_{a}")
-                    with col2: v=st.selectbox("Vehículo",vhs,key=f"v_{a}")
+                    with col2: v=st.selectbox("VehÃ­culo",vhs,key=f"v_{a}")
                     dc.append({"analista":a,"modo":modo_a,"zona":z,"vehiculo":v})
             else:
                 dc=[{"analista":"TODOS","modo":"Analista decide","zona":"","vehiculo":""}]
-            if st.button("💾 Guardar asignación"):
+            if st.button("ðŸ’¾ Guardar asignaciÃ³n"):
                 reemplazar_hoja("CONFIG",pd.DataFrame(dc)); st.session_state["config_df"] = pd.DataFrame(dc); st.success("Guardado.")
             cf = st.session_state.get("config_df", pd.DataFrame())
             if not cf.empty:
-                st.markdown("---"); st.markdown("##### Configuración activa:"); st.dataframe(cf,use_container_width=True)
+                st.markdown("---"); st.markdown("##### ConfiguraciÃ³n activa:"); st.dataframe(cf,use_container_width=True)
 
     with tab7:
-        st.subheader("⚙️ Reglas de recontacto automático")
+        st.subheader("âš™ï¸ Reglas de recontacto automÃ¡tico")
         st.markdown("""
-| Resultado / Estado | Acción | Días espera |
+| Resultado / Estado | AcciÃ³n | DÃ­as espera |
 |---|---|---|
-| No contestó | Recontacto | **5 días** |
-| Apagado / Fuera de servicio | Recontacto | **5 días** |
-| Número errado | Recontacto | **5 días** |
-| 10 - 14 intentos sin contacto | Pausa larga | **30 días** |
-| 15+ intentos sin contacto | ❌ Bloqueo permanente | Nunca |
-| Interesado llega a cargue | Pausa | **5 días** |
-| Fleet no acepta HUB | Pausa | **5 días** |
-| Interesado esporádico | Recontacto | **3 días** |
-| Aliado Rechaza la oferta | ❌ Bloqueo permanente | Nunca |
-| Empleado / Point | ❌ Bloqueo permanente | Nunca |
-| No le interesa | ❌ Bloqueo permanente | Nunca |
+| No contestÃ³ | Recontacto | **5 dÃ­as** |
+| Apagado / Fuera de servicio | Recontacto | **5 dÃ­as** |
+| NÃºmero errado | Recontacto | **5 dÃ­as** |
+| 10 - 14 intentos sin contacto | Pausa larga | **30 dÃ­as** |
+| 15+ intentos sin contacto | âŒ Bloqueo permanente | Nunca |
+| Interesado llega a cargue | Pausa | **5 dÃ­as** |
+| Fleet no acepta HUB | Pausa | **5 dÃ­as** |
+| Interesado esporÃ¡dico | Recontacto | **3 dÃ­as** |
+| Aliado Rechaza la oferta | âŒ Bloqueo permanente | Nunca |
+| Empleado / Point | âŒ Bloqueo permanente | Nunca |
+| No le interesa | âŒ Bloqueo permanente | Nunca |
         """)
-        st.info("Reglas automáticas: los aliados en pausa vuelven solos al cumplirse el tiempo.")
+        st.info("Reglas automÃ¡ticas: los aliados en pausa vuelven solos al cumplirse el tiempo.")
         st.markdown("---")
-        st.markdown("#### 🎯 Lógica de Estado Aliado")
+        st.markdown("#### ðŸŽ¯ LÃ³gica de Estado Aliado")
         st.markdown("""
-| Estado | Condición |
+| Estado | CondiciÃ³n |
 |---|---|
-| 🟢 **Cargando** | `dias_ultimo_cargue` entre 1 y 30 días |
-| 🟡 **No ubicable** | No contesta (3+ intentos) y está en pausa activa |
-| 🔴 **Deserta** | `proxima_gestion = NO_VOLVER` o estado en lista de bloqueo |
+| ðŸŸ¢ **Cargando** | `dias_ultimo_cargue` entre 1 y 30 dÃ­as |
+| ðŸŸ¡ **No ubicable** | No contesta (3+ intentos) y estÃ¡ en pausa activa |
+| ðŸ”´ **Deserta** | `proxima_gestion = NO_VOLVER` o estado en lista de bloqueo |
         """)
 
     with tab8:
-        st.subheader("🗺️ Cobertura de Gestión por Zona")
+        st.subheader("ðŸ—ºï¸ Cobertura de GestiÃ³n por Zona")
         if base is None:
             st.warning("Carga la base primero.")
         elif hist.empty:
-            st.warning("Aún no hay gestiones registradas.")
+            st.warning("AÃºn no hay gestiones registradas.")
         else:
             col_f1, col_f2, col_f3 = st.columns(3)
             with col_f1: fz1 = st.date_input("Desde", now_col().date()-timedelta(days=7), max_value=now_col().date(), key="cob_f1")
             with col_f2: fz2 = st.date_input("Hasta", now_col().date(), max_value=now_col().date(), key="cob_f2")
             with col_f3:
                 vhs_cob = ["Todos"] + sorted(base["vehiculo_norm"].dropna().unique().tolist())
-                vh_filtro = st.selectbox("Vehículo", vhs_cob, key="cob_vh")
+                vh_filtro = st.selectbox("VehÃ­culo", vhs_cob, key="cob_vh")
             hv_cob = hist.dropna(subset=["fecha"])
             hv_cob = hv_cob[(hv_cob["fecha"].dt.date >= fz1) & (hv_cob["fecha"].dt.date <= fz2)]
             gestionados_ids = set(hv_cob["identificacion"].astype(str).unique())
@@ -1344,37 +1366,37 @@ if perfil == "Coordinador":
             tot_g=df_res["Total aliados"].sum(); gest_g=df_res["Gestionados"].sum()
             pend_g=df_res["Pendientes"].sum(); pct_g=round(gest_g/tot_g*100,1) if tot_g>0 else 0
             c1,c2,c3,c4=st.columns(4)
-            c1.metric("📦 Total aliados",f"{tot_g:,}"); c2.metric("✅ Gestionados",f"{gest_g:,}")
-            c3.metric("⏳ Pendientes",f"{pend_g:,}"); c4.metric("📊 Cobertura global",f"{pct_g}%")
+            c1.metric("ðŸ“¦ Total aliados",f"{tot_g:,}"); c2.metric("âœ… Gestionados",f"{gest_g:,}")
+            c3.metric("â³ Pendientes",f"{pend_g:,}"); c4.metric("ðŸ“Š Cobertura global",f"{pct_g}%")
             st.markdown("---"); st.markdown("#### Detalle por zona")
             df_display=df_res.copy(); df_display["Cobertura"]=df_display["% Cobertura"].apply(lambda x: f"{x}%")
             st.dataframe(df_display[["Zona","Total aliados","Gestionados","Pendientes","Cobertura"]],use_container_width=True,hide_index=True)
             st.markdown("---")
             fig_cob=px.bar(df_res,x="Zona",y=["Gestionados","Pendientes"],barmode="stack",
-                           title=f"Cobertura por Zona · {fz1.strftime('%d/%m')} al {fz2.strftime('%d/%m/%Y')}",
+                           title=f"Cobertura por Zona Â· {fz1.strftime('%d/%m')} al {fz2.strftime('%d/%m/%Y')}",
                            color_discrete_map={"Gestionados":"#28a745","Pendientes":"#dc3545"},labels={"value":"Aliados","variable":"Estado"})
             fig_cob.update_layout(xaxis_tickangle=-45,legend_title_text=""); st.plotly_chart(fig_cob,use_container_width=True)
             fig_pct=px.bar(df_res.sort_values("% Cobertura"),x="% Cobertura",y="Zona",orientation="h",title="% Cobertura por Zona",
                            color="% Cobertura",color_continuous_scale=["#dc3545","#ffc107","#28a745"],range_color=[0,100])
             fig_pct.update_layout(coloraxis_showscale=False,yaxis_title=""); st.plotly_chart(fig_pct,use_container_width=True)
-            st.download_button("📥 Descargar reporte (CSV)",df_res.to_csv(index=False).encode("utf-8"),f"cobertura_{fz1}_{fz2}.csv","text/csv")
+            st.download_button("ðŸ“¥ Descargar reporte (CSV)",df_res.to_csv(index=False).encode("utf-8"),f"cobertura_{fz1}_{fz2}.csv","text/csv")
 
-    # ── TAB 9: IMPLEMENTACIÓN (dentro del módulo Coordinador) ──────────────
+    # â”€â”€ TAB 9: IMPLEMENTACIÃ“N (dentro del mÃ³dulo Coordinador) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     with tab9:
-        st.subheader("⚙️ Implementación — Dashboard Coordinador")
+        st.subheader("âš™ï¸ ImplementaciÃ³n â€” Dashboard Coordinador")
         df_impl_c  = _get_impl()
         hist_impl_c = _get_hist_impl()
 
-        if st.button("🔄 Actualizar Implementación", key="impl_ref_coord_tab9"):
+        if st.button("ðŸ”„ Actualizar ImplementaciÃ³n", key="impl_ref_coord_tab9"):
             _get_impl(force=True); _get_hist_impl(force=True); st.rerun()
 
         subtab_res, subtab_kpi, subtab_carga = st.tabs([
-            "📊 Resumen","📈 KPIs y análisis","📤 Cargar base"
+            "ðŸ“Š Resumen","ðŸ“ˆ KPIs y anÃ¡lisis","ðŸ“¤ Cargar base"
         ])
 
         with subtab_res:
             if df_impl_c is None:
-                st.warning("Carga la base de Implementación primero (pestaña 📤 Cargar base).")
+                st.warning("Carga la base de ImplementaciÃ³n primero (pestaÃ±a ðŸ“¤ Cargar base).")
             else:
                 # Segmentar la base
                 completados_c = df_impl_c[df_impl_c["total_cargues"] >= CARGUES_META_IMPL]
@@ -1398,26 +1420,26 @@ if perfil == "Coordinador":
                 pct_churn  = round(len(abandonaron_c)/max(total_impl,1)*100,1)
                 pct_noresp = round(len(sin_contacto_c)/max(total_impl,1)*100,1)
 
-                # ── KPIs estilo dashboard adjunto ─────────────────────────
+                # â”€â”€ KPIs estilo dashboard adjunto â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
                 st.markdown("---")
-                st.markdown("##### Seguimiento Implementación")
+                st.markdown("##### Seguimiento ImplementaciÃ³n")
                 kc1,kc2,kc3,kc4,kc5 = st.columns(5)
-                kc1.metric("👥 Total Drivers",  f"{total_impl}")
-                kc2.metric("🔄 Activos R7–R19", f"{total_activo:,}", "En seguimiento")
-                kc3.metric("📈 % Conversión a Programación",
+                kc1.metric("ðŸ‘¥ Total Drivers",  f"{total_impl}")
+                kc2.metric("ðŸ”„ Activos R7â€“R19", f"{total_activo:,}", "En seguimiento")
+                kc3.metric("ðŸ“ˆ % ConversiÃ³n a ProgramaciÃ³n",
                            f"{pct_grad}%", f"{len(completados_c)} Drivers")
-                kc4.metric("⚠️ Tasa de Abandono",
+                kc4.metric("âš ï¸ Tasa de Abandono",
                            f"{pct_churn}%", f"-{len(abandonaron_c)} Drivers", delta_color="inverse")
-                kc5.metric("📵 No contesta / Sin resp.",
+                kc5.metric("ðŸ“µ No contesta / Sin resp.",
                            f"{pct_noresp}%", f"{len(sin_contacto_c)} Drivers", delta_color="inverse")
 
                 st.markdown("---")
 
-                # ── Funnel R1→R7 + Barras de conversión ───────────────────
+                # â”€â”€ Funnel R1â†’R7 + Barras de conversiÃ³n â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
                 col_funnel, col_barras = st.columns(2)
 
                 with col_funnel:
-                    st.markdown("##### Funnel de retención R1 → R7")
+                    st.markdown("##### Funnel de retenciÃ³n R1 â†’ R7")
                     # Contar aliados por cargue acumulado
                     funnel_data = []
                     for r in range(CARGUES_MIN_IMPL, CARGUES_META_IMPL + 1):
@@ -1432,7 +1454,7 @@ if perfil == "Coordinador":
                         text="Aliados",
                         color="Ruta",
                         color_discrete_sequence=["#1565C0","#1976D2","#42A5F5","#64B5F6","#90CAF9","#BBDEFB","#E3F2FD"][:CARGUES_META_IMPL],
-                        title=f"Funnel retención R{CARGUES_MIN_IMPL} → R{CARGUES_META_IMPL}"
+                        title=f"Funnel retenciÃ³n R{CARGUES_MIN_IMPL} â†’ R{CARGUES_META_IMPL}"
                     )
                     fig_funnel.update_traces(textposition="outside")
                     fig_funnel.update_layout(showlegend=False, plot_bgcolor="#f8f9fa",
@@ -1446,7 +1468,7 @@ if perfil == "Coordinador":
                         n_ini = len(df_impl_c[df_impl_c["total_cargues"] == r])
                         n_sig = len(df_impl_c[df_impl_c["total_cargues"] == r + 1])
                         pct_ch = round((1 - n_sig/max(n_ini,1))*100, 2) if n_ini > 0 else 0
-                        churn_data.append({"Tramo": f"R{r}→R{r+1}", "% Churn": pct_ch})
+                        churn_data.append({"Tramo": f"R{r}â†’R{r+1}", "% Churn": pct_ch})
                     df_churn = pd.DataFrame(churn_data)
                     CHURN_COLORS = ["#C62828","#E53935","#EF9A9A","#FFCC02","#66BB6A"]
                     fig_churn = px.bar(
@@ -1454,7 +1476,7 @@ if perfil == "Coordinador":
                         text="% Churn",
                         color="Tramo",
                         color_discrete_sequence=CHURN_COLORS * 3,
-                        title="% Abandono por tramo (R7 → R20)"
+                        title="% Abandono por tramo (R7 â†’ R20)"
                     )
                     fig_churn.update_traces(texttemplate="%{text:.2f}%", textposition="outside")
                     fig_churn.update_layout(showlegend=False, plot_bgcolor="#f8f9fa",
@@ -1462,31 +1484,31 @@ if perfil == "Coordinador":
                                             yaxis_ticksuffix="%")
                     st.plotly_chart(fig_churn, use_container_width=True)
 
-                # ── Alta prioridad ─────────────────────────────────────────
-                alta_c = df_impl_c[df_impl_c["prioridad_impl"] == "🔴 ALTA"].copy()
+                # â”€â”€ Alta prioridad â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+                alta_c = df_impl_c[df_impl_c["prioridad_impl"] == "ðŸ”´ ALTA"].copy()
                 if not alta_c.empty:
                     st.markdown("---")
-                    st.markdown(f"#### 🔴 Alta prioridad — {len(alta_c)} aliados (2do cargue, mayor riesgo de abandono)")
+                    st.markdown(f"#### ðŸ”´ Alta prioridad â€” {len(alta_c)} aliados (2do cargue, mayor riesgo de abandono)")
                     cols_ac = [c for c in ["identificacion","nombre","celular","zona","vehiculo_norm",
                                             "total_cargues","cargues_faltantes","analista_impl","estado_impl"]
                                if c in alta_c.columns]
                     st.dataframe(alta_c[cols_ac], use_container_width=True, hide_index=True)
 
-                # ── Listos para Programación ───────────────────────────────
+                # â”€â”€ Listos para ProgramaciÃ³n â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
                 listos_c = completados_c.copy()
                 if not listos_c.empty:
                     st.markdown("---")
-                    st.markdown("#### ✅ " + str(len(listos_c)) + f" aliados con R{CARGUES_META_IMPL}+ — listos para Programación")
+                    st.markdown("#### âœ… " + str(len(listos_c)) + f" aliados con R{CARGUES_META_IMPL}+ â€” listos para ProgramaciÃ³n")
                     cols_lc = [c for c in ["identificacion","nombre","celular","zona","vehiculo_norm","total_cargues"]
                                if c in listos_c.columns]
                     st.dataframe(listos_c[cols_lc], use_container_width=True, hide_index=True)
-                    st.download_button("📥 Descargar listos para Programación",
+                    st.download_button("ðŸ“¥ Descargar listos para ProgramaciÃ³n",
                                        listos_c.to_csv(index=False).encode("utf-8"),
                                        "listos_programacion.csv", "text/csv")
 
-                # ── Tabla completa filtrable ───────────────────────────────
+                # â”€â”€ Tabla completa filtrable â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
                 st.markdown("---")
-                st.markdown("#### 📋 Base completa Implementación")
+                st.markdown("#### ðŸ“‹ Base completa ImplementaciÃ³n")
                 col_fe1, col_fe2, col_fe3 = st.columns(3)
                 with col_fe1:
                     est_fil_c = st.selectbox(
@@ -1499,7 +1521,7 @@ if perfil == "Coordinador":
                     zona_fil_c = st.selectbox("Zona", zonas_impl, key="zona_fil_impl_coord")
                 with col_fe3:
                     vhs_impl = ["Todos"] + sorted(df_impl_c["vehiculo_norm"].dropna().unique().tolist()) if "vehiculo_norm" in df_impl_c.columns else ["Todos"]
-                    vh_fil_c = st.selectbox("Vehículo", vhs_impl, key="vh_fil_impl_coord")
+                    vh_fil_c = st.selectbox("VehÃ­culo", vhs_impl, key="vh_fil_impl_coord")
 
                 df_impl_show = df_impl_c.copy()
                 if est_fil_c != "Todos":
@@ -1515,7 +1537,7 @@ if perfil == "Coordinador":
                               if c in df_impl_show.columns]
                 st.caption(f"Mostrando {len(df_impl_show):,} aliados")
                 st.dataframe(df_impl_show[cols_tbl_c], use_container_width=True, hide_index=True)
-                st.download_button("📥 Descargar filtrado",
+                st.download_button("ðŸ“¥ Descargar filtrado",
                                    df_impl_show.to_csv(index=False).encode("utf-8"),
                                    f"implementacion_{now_col().date()}.csv", "text/csv")
 
@@ -1530,14 +1552,14 @@ if perfil == "Coordinador":
                 pct_abd_c = round(abd_c / max(total_ic, 1) * 100, 1)
 
                 ci1k, ci2k, ci3k = st.columns(3)
-                ci1k.metric("% Conversión a Programación (R20)", f"{pct_conv_c}%")
+                ci1k.metric("% ConversiÃ³n a ProgramaciÃ³n (R20)", f"{pct_conv_c}%")
                 ci2k.metric("% abandono", f"{pct_abd_c}%")
                 ci3k.metric("Cargue promedio",
                             f"{df_impl_c['total_cargues'].mean():.1f}" if total_ic else "N/A")
 
                 st.markdown("---")
                 if "zona" in df_impl_c.columns:
-                    st.markdown("#### Conversión por zona")
+                    st.markdown("#### ConversiÃ³n por zona")
                     zona_gc = df_impl_c.groupby("zona").agg(
                         total=("identificacion","count"),
                         completaron=("total_cargues", lambda x: (x >= CARGUES_META_IMPL).sum())
@@ -1545,14 +1567,14 @@ if perfil == "Coordinador":
                     zona_gc["% conv"] = (zona_gc["completaron"] / zona_gc["total"] * 100).round(1)
                     st.dataframe(zona_gc.sort_values("% conv", ascending=False), use_container_width=True, hide_index=True)
                     fig_zona_c = px.bar(zona_gc, x="zona", y="% conv",
-                                        title="% Conversión a Programación por zona",
+                                        title="% ConversiÃ³n a ProgramaciÃ³n por zona",
                                         color="% conv",
                                         color_continuous_scale=["#dc3545","#ffc107","#28a745"],
                                         range_color=[0, 100])
                     st.plotly_chart(fig_zona_c, use_container_width=True)
 
                 if "vehiculo_norm" in df_impl_c.columns:
-                    st.markdown("#### Conversión por vehículo")
+                    st.markdown("#### ConversiÃ³n por vehÃ­culo")
                     veh_gc = df_impl_c.groupby("vehiculo_norm").agg(
                         total=("identificacion","count"),
                         completaron=("total_cargues", lambda x: (x >= CARGUES_META_IMPL).sum())
@@ -1566,10 +1588,10 @@ if perfil == "Coordinador":
                     abd_df_c = hist_impl_c[hist_impl_c["estado"].astype(str).str.contains("Abandona", na=False)]
                     if not abd_df_c.empty:
                         rz_c = abd_df_c["razon"].value_counts().reset_index()
-                        rz_c.columns = ["Razón","Cantidad"]
+                        rz_c.columns = ["RazÃ³n","Cantidad"]
                         st.dataframe(rz_c, use_container_width=True, hide_index=True)
-                        fig_rz = px.bar(rz_c, x="Cantidad", y="Razón", orientation="h",
-                                        title="Razones de abandono en Implementación",
+                        fig_rz = px.bar(rz_c, x="Cantidad", y="RazÃ³n", orientation="h",
+                                        title="Razones de abandono en ImplementaciÃ³n",
                                         color_discrete_sequence=["#A32D2D"])
                         st.plotly_chart(fig_rz, use_container_width=True)
 
@@ -1578,21 +1600,21 @@ if perfil == "Coordinador":
                     tend_ic = hist_impl_c.groupby(hist_impl_c["fecha"].dt.date).size().reset_index(name="gestiones")
                     tend_ic.columns = ["fecha","gestiones"]
                     st.plotly_chart(px.line(tend_ic, x="fecha", y="gestiones",
-                                            title="Gestiones diarias — Implementación", markers=True),
+                                            title="Gestiones diarias â€” ImplementaciÃ³n", markers=True),
                                     use_container_width=True)
 
         with subtab_carga:
-            st.subheader("📤 Cargar base de Implementación")
+            st.subheader("ðŸ“¤ Cargar base de ImplementaciÃ³n")
             st.info("""
 **Columnas esperadas en el Excel:**
-`identificacion`, `nombre`, `celular`, `vehiculo`, `zona`, `total_cargues` (debe ser ≥ 7), `fecha_ultimo_cargue`
+`identificacion`, `nombre`, `celular`, `vehiculo`, `zona`, `total_cargues` (debe ser â‰¥ 7), `fecha_ultimo_cargue`
 
-Los campos CRM se agregan automáticamente. Usa **Incremental** para conservar el historial.
+Los campos CRM se agregan automÃ¡ticamente. Usa **Incremental** para conservar el historial.
             """)
             modo_impl_c = st.radio(
                 "Modo de carga",
-                ["🔄 Incremental (recomendado) — conserva historial CRM",
-                 "♻️ Reemplazar toda la base — borra historial CRM"],
+                ["ðŸ”„ Incremental (recomendado) â€” conserva historial CRM",
+                 "â™»ï¸ Reemplazar toda la base â€” borra historial CRM"],
                 key="modo_carga_impl_coord"
             )
             archivo_impl_c = st.file_uploader("Excel (.xlsx)", type=["xlsx"], key="uploader_impl_coord_tab9")
@@ -1601,20 +1623,20 @@ Los campos CRM se agregan automáticamente. Usa **Incremental** para conservar e
                     df_s_c = pd.read_excel(archivo_impl_c, engine="openpyxl")
                     df_s_c = df_s_c[[c for c in df_s_c.columns if not str(c).startswith("Unnamed")]]
                     df_s_c = _df_safe_str(df_s_c).fillna("")
-                    st.success(f"{len(df_s_c):,} registros leídos")
+                    st.success(f"{len(df_s_c):,} registros leÃ­dos")
                     st.dataframe(df_s_c.head(5), use_container_width=True)
                     if "Incremental" in modo_impl_c:
-                        if st.button("🚀 Ejecutar Cruce Incremental", key="btn_incr_impl_coord"):
+                        if st.button("ðŸš€ Ejecutar Cruce Incremental", key="btn_incr_impl_coord"):
                             with st.spinner("Procesando cruce incremental..."):
                                 nn_c, na_c, nc_c = cargar_base_implementacion(df_s_c, modo="incremental")
-                            st.success(f"✅ {nn_c} aliados nuevos · {na_c} actualizados · {nc_c} ya alcanzaron R20 (pasan a Programación)")
+                            st.success(f"âœ… {nn_c} aliados nuevos Â· {na_c} actualizados Â· {nc_c} ya alcanzaron R20 (pasan a ProgramaciÃ³n)")
                     else:
-                        st.warning("⚠️ Esto borrará TODA la base de Implementación incluyendo el historial CRM.")
-                        confirmar_impl = st.checkbox("Entiendo que se borrará todo el historial de Implementación", key="confirm_impl_coord")
-                        if confirmar_impl and st.button("♻️ Reemplazar base completa", key="btn_repl_impl_coord"):
+                        st.warning("âš ï¸ Esto borrarÃ¡ TODA la base de ImplementaciÃ³n incluyendo el historial CRM.")
+                        confirmar_impl = st.checkbox("Entiendo que se borrarÃ¡ todo el historial de ImplementaciÃ³n", key="confirm_impl_coord")
+                        if confirmar_impl and st.button("â™»ï¸ Reemplazar base completa", key="btn_repl_impl_coord"):
                             with st.spinner("Subiendo base completa..."):
                                 nn_c, na_c, nc_c = cargar_base_implementacion(df_s_c, modo="reemplazar")
-                            st.success(f"✅ {len(df_s_c):,} aliados subidos desde cero.")
+                            st.success(f"âœ… {len(df_s_c):,} aliados subidos desde cero.")
                 except Exception as e:
                     st.error(f"Error leyendo el archivo: {e}")
 
@@ -1624,26 +1646,26 @@ Los campos CRM se agregan automáticamente. Usa **Incremental** para conservar e
 if perfil == "Analista":
     base = _get_base(); hist = _get_hist()
     if base is None:
-        st.warning("⚠️ La coordinadora aún no ha cargado la base. Espera un momento.")
+        st.warning("âš ï¸ La coordinadora aÃºn no ha cargado la base. Espera un momento.")
         st.stop()
-    tab_g, tab_h, tab_his, tab_bus, tab_impl = st.tabs(["📞 Gestión del Día","📊 Mi Resumen de Hoy","📅 Mi Histórico","🔍 Buscar Aliado","⚙️ Implementación"])
+    tab_g, tab_h, tab_his, tab_bus, tab_impl = st.tabs(["ðŸ“ž GestiÃ³n del DÃ­a","ðŸ“Š Mi Resumen de Hoy","ðŸ“… Mi HistÃ³rico","ðŸ” Buscar Aliado","âš™ï¸ ImplementaciÃ³n"])
 
     with tab_g:
         modo_c,zona_c,vh_c=leer_config(nombre)
-        if modo_c in ("Asignación general (todos igual)","Asignación por analista") and zona_c and vh_c:
+        if modo_c in ("AsignaciÃ³n general (todos igual)","AsignaciÃ³n por analista") and zona_c and vh_c:
             zona_sel=str(zona_c); vh_sel=str(vh_c)
-            st.success(f"🎯 Hoy: **{zona_sel}** — **{vh_sel}**")
+            st.success(f"ðŸŽ¯ Hoy: **{zona_sel}** â€” **{vh_sel}**")
         else:
             zonas=sorted(base["zona"].dropna().unique()); vhs=sorted(base["vehiculo_norm"].dropna().unique())
-            zona_sel=st.selectbox("Zona",zonas); vh_sel=st.selectbox("Vehículo",vhs)
+            zona_sel=st.selectbox("Zona",zonas); vh_sel=st.selectbox("VehÃ­culo",vhs)
 
         pool=base[(base["zona"].astype(str)==zona_sel)&(base["vehiculo_norm"].astype(str)==vh_sel)].copy()
         pool=filtrar_pool(pool)
         if pool.empty:
-            st.info("No hay aliados disponibles. Los aliados en pausa volverán cuando se cumpla su tiempo.")
+            st.info("No hay aliados disponibles. Los aliados en pausa volverÃ¡n cuando se cumpla su tiempo.")
             st.stop()
         pool["PRIORIDAD"]=pool["dias"].apply(_prio)
-        op={"🔴 ALTA":0,"🟡 MEDIA":1,"🟢 BAJA":2}
+        op={"ðŸ”´ ALTA":0,"ðŸŸ¡ MEDIA":1,"ðŸŸ¢ BAJA":2}
         pool["_o"]=pool["PRIORIDAD"].map(op).fillna(3)
         pool=pool.sort_values("_o").drop(columns=["_o"]).reset_index(drop=True)
 
@@ -1653,12 +1675,12 @@ if perfil == "Analista":
             gh = hv[hv["fecha"].dt.date==now_col().date()]["identificacion"].astype(str).tolist()
             pool = pool[~pool["identificacion"].astype(str).isin(gh)]
 
-        # ── NUEVO: filtro por estado_aliado en el pool ───────────────────
+        # â”€â”€ NUEVO: filtro por estado_aliado en el pool â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         if "estado_aliado" in pool.columns:
             estados_pool = ["Todos"] + sorted(pool["estado_aliado"].dropna().unique().tolist())
             col_cant, col_prio, col_est = st.columns(3)
             with col_cant: cant=st.number_input("Cantidad de aliados",min_value=10,max_value=300,value=30)
-            with col_prio: fp=st.selectbox("Prioridad",["Todas (ALTA + MEDIA + BAJA)","Solo 🔴 ALTA","Solo 🟡 MEDIA","Solo 🟢 BAJA"])
+            with col_prio: fp=st.selectbox("Prioridad",["Todas (ALTA + MEDIA + BAJA)","Solo ðŸ”´ ALTA","Solo ðŸŸ¡ MEDIA","Solo ðŸŸ¢ BAJA"])
             with col_est:
                 est_filtro = st.selectbox("Estado aliado", estados_pool, key="filtro_est_aliado")
             if est_filtro != "Todos":
@@ -1666,14 +1688,14 @@ if perfil == "Analista":
         else:
             c1,c2=st.columns(2)
             with c1: cant=st.number_input("Cantidad de aliados",min_value=10,max_value=300,value=30)
-            with c2: fp=st.selectbox("Prioridad",["Todas (ALTA + MEDIA + BAJA)","Solo 🔴 ALTA","Solo 🟡 MEDIA","Solo 🟢 BAJA"])
+            with c2: fp=st.selectbox("Prioridad",["Todas (ALTA + MEDIA + BAJA)","Solo ðŸ”´ ALTA","Solo ðŸŸ¡ MEDIA","Solo ðŸŸ¢ BAJA"])
 
-        if fp=="Solo 🔴 ALTA":    pool=pool[pool["PRIORIDAD"]=="🔴 ALTA"]
-        elif fp=="Solo 🟡 MEDIA": pool=pool[pool["PRIORIDAD"]=="🟡 MEDIA"]
-        elif fp=="Solo 🟢 BAJA":  pool=pool[pool["PRIORIDAD"]=="🟢 BAJA"]
+        if fp=="Solo ðŸ”´ ALTA":    pool=pool[pool["PRIORIDAD"]=="ðŸ”´ ALTA"]
+        elif fp=="Solo ðŸŸ¡ MEDIA": pool=pool[pool["PRIORIDAD"]=="ðŸŸ¡ MEDIA"]
+        elif fp=="Solo ðŸŸ¢ BAJA":  pool=pool[pool["PRIORIDAD"]=="ðŸŸ¢ BAJA"]
         st.caption(f"Disponibles en este filtro: **{len(pool)}**")
 
-        if st.button("🚀 Generar mis llamadas"):
+        if st.button("ðŸš€ Generar mis llamadas"):
             hoy_s=now_col().date().isoformat(); rep=cargar_reparto()
             if not rep.empty and "fecha" in rep.columns:
                 if len(rep)>0 and str(rep["fecha"].iloc[0])!=hoy_s:
@@ -1688,7 +1710,7 @@ if perfil == "Analista":
                 nf=pd.DataFrame({"fecha":[hoy_s]*len(bloque),"analista":[nombre]*len(bloque),"identificacion":bloque["identificacion"].astype(str).tolist()})
                 guardar_reparto(pd.concat([rep,nf],ignore_index=True))
                 st.session_state["pool_activo"]=bloque; st.session_state["hechas"]=0
-                st.success(f"✅ {len(bloque)} aliados asignados."); st.rerun()
+                st.success(f"âœ… {len(bloque)} aliados asignados."); st.rerun()
 
         hoy_s=now_col().date().isoformat(); rep_act=cargar_reparto(); mis_ids=[]
         if not rep_act.empty and "fecha" in rep_act.columns and "analista" in rep_act.columns:
@@ -1705,69 +1727,69 @@ if perfil == "Analista":
             st.progress(pct,text=f"Progreso: {hechas} gestionados / {rest} pendientes")
             mis_datos=base[base["identificacion"].astype(str).isin(mis_ids)].copy()
             if "PRIORIDAD" not in mis_datos.columns: mis_datos["PRIORIDAD"]=mis_datos["dias"].apply(_prio)
-            # ── NUEVO: incluir estado_aliado en la tabla de pendientes ───────
+            # â”€â”€ NUEVO: incluir estado_aliado en la tabla de pendientes â”€â”€â”€â”€â”€â”€â”€
             cols_v=[c for c in ["identificacion","mensajero","celular","zona","vehiculo",
                                   "dias","intentos","estado_aliado","PRIORIDAD"]
                     if c in mis_datos.columns]
-            st.markdown(f"#### 📋 Pendientes ({rest})")
+            st.markdown(f"#### ðŸ“‹ Pendientes ({rest})")
             mis_datos_show = mis_datos[cols_v].copy()
             if "estado_aliado" in mis_datos_show.columns:
                 mis_datos_show["estado_aliado"] = mis_datos_show["estado_aliado"].apply(_badge_estado)
             st.dataframe(mis_datos_show, use_container_width=True, hide_index=True)
-            st.markdown("---"); st.markdown("#### 📞 Registrar gestión")
+            st.markdown("---"); st.markdown("#### ðŸ“ž Registrar gestiÃ³n")
             with st.form("form_g",clear_on_submit=True):
                 c1,c2=st.columns(2)
-                with c1: ali=st.selectbox("Cédula del aliado",mis_ids); res=st.selectbox("Resultado de la llamada",RESULTADOS)
-                with c2: est=st.selectbox("Estado final (si contestó)",["-"]+ESTADOS_FINALES); raz=st.selectbox("Razón (si contestó)",["-"]+RAZONES)
+                with c1: ali=st.selectbox("CÃ©dula del aliado",mis_ids); res=st.selectbox("Resultado de la llamada",RESULTADOS)
+                with c2: est=st.selectbox("Estado final (si contestÃ³)",["-"]+ESTADOS_FINALES); raz=st.selectbox("RazÃ³n (si contestÃ³)",["-"]+RAZONES)
                 fd=mis_datos[mis_datos["identificacion"].astype(str)==str(ali)]
                 if not fd.empty:
                     f=fd.iloc[0]; ic=[c for c in ["mensajero","celular","intentos","estado_aliado","PRIORIDAD"] if c in f.index]
                     ci=st.columns(max(len(ic),1))
                     for i,cn in enumerate(ic): ci[i].metric(cn.replace("_"," ").capitalize(),str(f[cn]))
-                obs=st.text_area("Observaciones"); sub=st.form_submit_button("💾 GUARDAR GESTIÓN")
+                obs=st.text_area("Observaciones"); sub=st.form_submit_button("ðŸ’¾ GUARDAR GESTIÃ“N")
             if sub:
                 er=None if est=="-" else est; rr=None if raz=="-" else raz
-                if res=="Sí contestó" and er is None:
+                if res=="SÃ­ contestÃ³" and er is None:
                     st.error("Selecciona un Estado final.")
                 else:
                     guardar_gestion({"fecha":now_col(),"analista":nombre,"identificacion":ali,"resultado":res,"estado":er,"razon":rr,"obs":obs})
                     with st.spinner("Actualizando CRM..."): actualizar_base_crm(ali,res,er,rr)
                     st.session_state["hechas"]=st.session_state.get("hechas",0)+1
-                    st.success("✅ Guardado. Próximo recontacto calculado automáticamente."); st.rerun()
+                    st.success("âœ… Guardado. PrÃ³ximo recontacto calculado automÃ¡ticamente."); st.rerun()
         else:
-            st.info("✅ Sin aliados pendientes. Genera un nuevo bloque arriba.")
+            st.info("âœ… Sin aliados pendientes. Genera un nuevo bloque arriba.")
 
     with tab_h:
-        st.subheader(f"Tus gestiones de hoy — {now_col().strftime('%d/%m/%Y')}")
+        st.subheader(f"Tus gestiones de hoy â€” {now_col().strftime('%d/%m/%Y')}")
         if hist.empty:
             st.info("Sin gestiones hoy.")
         else:
             hv3=hist.copy(); hv3["fecha"]=pd.to_datetime(hv3["fecha"],errors="coerce"); hv3=hv3.dropna(subset=["fecha"])
             mh=hv3[(hv3["analista"]==nombre)&(hv3["fecha"].dt.date==now_col().date())].copy()
             if mh.empty:
-                st.info("Sin gestiones hoy. ¡Empieza en Gestión del Día!")
+                st.info("Sin gestiones hoy. Â¡Empieza en GestiÃ³n del DÃ­a!")
             else:
-                t=len(mh); sc=len(mh[mh["resultado"]=="Sí contestó"]); it=len(mh[mh["estado"]=="Interesado llega a cargue"]); nr=len(mh[mh["resultado"].isin(NO_RESPONDEN)])
+                t=len(mh); sc=len(mh[mh["resultado"]=="SÃ­ contestÃ³"]); it=len(mh[mh["estado"]=="Interesado llega a cargue"]); nr=len(mh[mh["resultado"].isin(NO_RESPONDEN)])
                 c1,c2,c3,c4=st.columns(4)
-                c1.metric("📞 Llamadas",t); c2.metric("✅ Contactados",sc); c3.metric("🚗 Interesados",it); c4.metric("📵 No resp.",nr)
+                c1.metric("ðŸ“ž Llamadas",t); c2.metric("âœ… Contactados",sc); c3.metric("ðŸš— Interesados",it); c4.metric("ðŸ“µ No resp.",nr)
                 if t>0: st.metric("% Efectividad",f"{round(it/t*100,1)}%")
                 st.markdown("---"); mh["Hora"]=mh["fecha"].dt.strftime("%I:%M %p")
                 st.dataframe(mh[["Hora","identificacion","resultado","estado","razon","obs"]].rename(
-                    columns={"identificacion":"Cédula","resultado":"Resultado","estado":"Estado","razon":"Razón","obs":"Obs"}),use_container_width=True,hide_index=True)
-                st.download_button("📥 Descargar",mh.to_csv(index=False).encode("utf-8"),f"hoy_{now_col().date()}.csv","text/csv")
+                    columns={"identificacion":"CÃ©dula","resultado":"Resultado","estado":"Estado","razon":"RazÃ³n","obs":"Obs"}),use_container_width=True,hide_index=True)
+                st.download_button("ðŸ“¥ Descargar",mh.to_csv(index=False).encode("utf-8"),f"hoy_{now_col().date()}.csv","text/csv")
                 if t>=3:
                     rr=mh.groupby("resultado").size().reset_index(name="n")
-                    st.plotly_chart(px.pie(rr,values="n",names="resultado",title="Distribución de resultados"),use_container_width=True)
+                    st.plotly_chart(px.pie(rr,values="n",names="resultado",title="DistribuciÃ³n de resultados"),use_container_width=True)
 
     with tab_his:
-        st.subheader("Mi Histórico de Gestiones")
+        st.subheader("Mi HistÃ³rico de Gestiones")
         if hist.empty:
             st.info("Sin historial.")
         else:
             hv4=hist.copy(); hv4["fecha"]=pd.to_datetime(hv4["fecha"],errors="coerce"); hv4=hv4.dropna(subset=["fecha"])
             mhist=hv4[hv4["analista"]==nombre].copy()
             if mhist.empty:
-                st.info("Sin gestiones registradas aún.")
+                st.info("Sin gestiones registradas aÃºn.")
             else:
                 c1,c2=st.columns(2)
                 with c1: fd=st.date_input("Desde",now_col().date()-timedelta(days=7),max_value=now_col().date(),key="mh_d")
@@ -1776,18 +1798,18 @@ if perfil == "Analista":
                 if mf.empty:
                     st.warning("Sin gestiones en ese rango.")
                 else:
-                    t=len(mf); sc=len(mf[mf["resultado"]=="Sí contestó"]); it=len(mf[mf["estado"]=="Interesado llega a cargue"]); nr=len(mf[mf["resultado"].isin(NO_RESPONDEN)])
+                    t=len(mf); sc=len(mf[mf["resultado"]=="SÃ­ contestÃ³"]); it=len(mf[mf["estado"]=="Interesado llega a cargue"]); nr=len(mf[mf["resultado"].isin(NO_RESPONDEN)])
                     c1,c2,c3,c4=st.columns(4)
-                    c1.metric("📞 Total",t); c2.metric("✅ Contactados",sc); c3.metric("🚗 Interesados",it); c4.metric("📵 No resp.",nr)
+                    c1.metric("ðŸ“ž Total",t); c2.metric("âœ… Contactados",sc); c3.metric("ðŸš— Interesados",it); c4.metric("ðŸ“µ No resp.",nr)
                     if t>0:
                         c5,c6=st.columns(2); c5.metric("% Contacto",f"{round(sc/t*100,1)}%"); c6.metric("% Interesados",f"{round(it/t*100,1)}%")
                     td=mf.groupby(mf["fecha"].dt.date).size().reset_index(name="llamadas"); td.columns=["fecha","llamadas"]
-                    st.plotly_chart(px.bar(td,x="fecha",y="llamadas",title="Mis llamadas por día"),use_container_width=True)
+                    st.plotly_chart(px.bar(td,x="fecha",y="llamadas",title="Mis llamadas por dÃ­a"),use_container_width=True)
                     st.markdown("---")
                     for dia in sorted(mf["fecha"].dt.date.unique(),reverse=True):
                         rd=mf[mf["fecha"].dt.date==dia].copy()
-                        lbl="🟢 Hoy" if dia==now_col().date() else dia.strftime("%A %d/%m/%Y").capitalize()
-                        with st.expander(f"{lbl} — {len(rd)} gestiones"):
+                        lbl="ðŸŸ¢ Hoy" if dia==now_col().date() else dia.strftime("%A %d/%m/%Y").capitalize()
+                        with st.expander(f"{lbl} â€” {len(rd)} gestiones"):
                             rd["Hora"]=rd["fecha"].dt.strftime("%I:%M %p")
                             if base is not None:
                                 cols_extra=[c for c in ["identificacion","vehiculo","municipio"] if c in base.columns]
@@ -1797,24 +1819,24 @@ if perfil == "Analista":
                             for extra in ["vehiculo","municipio"]:
                                 if extra in rd.columns: cols_rd.append(extra)
                             cols_rd.append("obs")
-                            st.dataframe(rd[cols_rd].rename(columns={"identificacion":"Cédula","resultado":"Resultado","estado":"Estado","razon":"Razón","vehiculo":"Vehículo","municipio":"Ciudad","obs":"Obs"}),use_container_width=True,hide_index=True)
-                    st.download_button("📥 Descargar historial",mf.to_csv(index=False).encode("utf-8"),f"historial_{fd}_{fh}.csv","text/csv")
+                            st.dataframe(rd[cols_rd].rename(columns={"identificacion":"CÃ©dula","resultado":"Resultado","estado":"Estado","razon":"RazÃ³n","vehiculo":"VehÃ­culo","municipio":"Ciudad","obs":"Obs"}),use_container_width=True,hide_index=True)
+                    st.download_button("ðŸ“¥ Descargar historial",mf.to_csv(index=False).encode("utf-8"),f"historial_{fd}_{fh}.csv","text/csv")
 
     with tab_bus:
-        st.subheader("🔍 Buscar Aliado por Cédula o Teléfono")
-        st.caption("Consulta datos, historial y registra una gestión para cualquier aliado.")
-        cedula_bus = st.text_input("Ingresa la cédula o teléfono", "", key="ana_busq_cedula")
+        st.subheader("ðŸ” Buscar Aliado por CÃ©dula o TelÃ©fono")
+        st.caption("Consulta datos, historial y registra una gestiÃ³n para cualquier aliado.")
+        cedula_bus = st.text_input("Ingresa la cÃ©dula o telÃ©fono", "", key="ana_busq_cedula")
         if cedula_bus.strip() and base is not None:
             termino = cedula_bus.strip()
-            # Buscar por cédula primero, luego por celular
+            # Buscar por cÃ©dula primero, luego por celular
             res_b = base[base["identificacion"].astype(str) == termino]
             if res_b.empty and "celular" in base.columns:
                 res_b = base[base["celular"].astype(str).str.replace(r"\D","",regex=True) ==
                              termino.replace(" ","")]
             if res_b.empty:
-                st.warning(f"No se encontró ningún aliado con cédula **{cedula_bus}**.")
+                st.warning(f"No se encontrÃ³ ningÃºn aliado con cÃ©dula **{cedula_bus}**.")
             else:
-                fila_b = res_b.iloc[0]; st.success("✅ Aliado encontrado")
+                fila_b = res_b.iloc[0]; st.success("âœ… Aliado encontrado")
                 cols_info = [c for c in ["identificacion","mensajero","celular","zona","municipio",
                                           "vehiculo","categoria","estado_aliado",
                                           "dias","intentos","ultimo_resultado","ultimo_estado","proxima_gestion"]
@@ -1824,52 +1846,52 @@ if perfil == "Analista":
                     for col in cols_info[:mitad]: st.metric(col.replace("_"," ").title(), str(fila_b[col]))
                 with c2:
                     for col in cols_info[mitad:]: st.metric(col.replace("_"," ").title(), str(fila_b[col]))
-                st.markdown("---"); st.markdown("#### 📋 Historial de gestiones")
+                st.markdown("---"); st.markdown("#### ðŸ“‹ Historial de gestiones")
                 hist_ali = hist[hist["identificacion"].astype(str) == cedula_bus.strip()].copy()
                 if hist_ali.empty:
                     st.info("Sin gestiones registradas para este aliado.")
                 else:
                     hist_ali["Hora"] = hist_ali["fecha"].dt.strftime("%d/%m/%Y %I:%M %p")
                     st.dataframe(hist_ali[["Hora","analista","resultado","estado","razon","obs"]].rename(
-                        columns={"analista":"Analista","resultado":"Resultado","estado":"Estado","razon":"Razón","obs":"Obs"}),use_container_width=True,hide_index=True)
-                st.markdown("---"); st.markdown("#### 📞 Registrar gestión para este aliado")
+                        columns={"analista":"Analista","resultado":"Resultado","estado":"Estado","razon":"RazÃ³n","obs":"Obs"}),use_container_width=True,hide_index=True)
+                st.markdown("---"); st.markdown("#### ðŸ“ž Registrar gestiÃ³n para este aliado")
                 ya_gestionado_hoy = False
                 if not hist.empty:
                     hv_bus=hist.copy(); hv_bus["fecha"]=pd.to_datetime(hv_bus["fecha"],errors="coerce"); hv_bus=hv_bus.dropna(subset=["fecha"])
                     gest_hoy_bus=hv_bus[(hv_bus["identificacion"].astype(str)==cedula_bus.strip())&(hv_bus["fecha"].dt.date==now_col().date())]
                     ya_gestionado_hoy = not gest_hoy_bus.empty
                 if ya_gestionado_hoy:
-                    st.info("✅ Este aliado ya fue gestionado hoy. Puedes gestionar de nuevo si es necesario.")
+                    st.info("âœ… Este aliado ya fue gestionado hoy. Puedes gestionar de nuevo si es necesario.")
                 form_key = f"form_busq_{cedula_bus.strip()}"
                 with st.form(form_key, clear_on_submit=True):
                     cb1, cb2 = st.columns(2)
                     with cb1: res_b2 = st.selectbox("Resultado de la llamada", RESULTADOS, key=f"res_{cedula_bus}")
-                    with cb2: est_b  = st.selectbox("Estado final (si contestó)", ["-"]+ESTADOS_FINALES, key=f"est_{cedula_bus}")
-                    raz_b  = st.selectbox("Razón (si contestó)", ["-"]+RAZONES, key=f"raz_{cedula_bus}")
+                    with cb2: est_b  = st.selectbox("Estado final (si contestÃ³)", ["-"]+ESTADOS_FINALES, key=f"est_{cedula_bus}")
+                    raz_b  = st.selectbox("RazÃ³n (si contestÃ³)", ["-"]+RAZONES, key=f"raz_{cedula_bus}")
                     obs_b  = st.text_area("Observaciones", key=f"obs_{cedula_bus}")
-                    sub_b  = st.form_submit_button("💾 GUARDAR GESTIÓN")
+                    sub_b  = st.form_submit_button("ðŸ’¾ GUARDAR GESTIÃ“N")
                 if sub_b:
                     er_b = None if est_b == "-" else est_b; rr_b = None if raz_b == "-" else raz_b
-                    if res_b2 == "Sí contestó" and er_b is None:
+                    if res_b2 == "SÃ­ contestÃ³" and er_b is None:
                         st.error("Selecciona un Estado final.")
                     else:
                         guardar_gestion({"fecha":now_col(),"analista":nombre,"identificacion":cedula_bus.strip(),"resultado":res_b2,"estado":er_b,"razon":rr_b,"obs":obs_b})
                         with st.spinner("Actualizando CRM..."): actualizar_base_crm(cedula_bus.strip(), res_b2, er_b, rr_b)
-                        st.success(f"✅ Gestión guardada para {cedula_bus.strip()}. Próximo recontacto calculado."); st.rerun()
+                        st.success(f"âœ… GestiÃ³n guardada para {cedula_bus.strip()}. PrÃ³ximo recontacto calculado."); st.rerun()
         elif cedula_bus.strip() and base is None:
             st.warning("Base no disponible.")
 
-    # ── TAB IMPLEMENTACIÓN (dentro del módulo Analista) ─────────────────────
+    # â”€â”€ TAB IMPLEMENTACIÃ“N (dentro del mÃ³dulo Analista) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     with tab_impl:
-        st.subheader("⚙️ Implementación — Aliados del R7 al R20 (gestión hasta Programación)")
+        st.subheader("âš™ï¸ ImplementaciÃ³n â€” Aliados del R7 al R20 (gestiÃ³n hasta ProgramaciÃ³n)")
         df_impl_a  = _get_impl()
         hist_impl_a = _get_hist_impl()
 
         if df_impl_a is None:
-            st.info("La coordinadora aún no ha cargado la base de Implementación.")
+            st.info("La coordinadora aÃºn no ha cargado la base de ImplementaciÃ³n.")
         else:
             tab_mis_a, tab_bus_a, tab_hoy_a = st.tabs([
-                "📋 Mis aliados","🔍 Buscar aliado","📊 Mi resumen de hoy"
+                "ðŸ“‹ Mis aliados","ðŸ” Buscar aliado","ðŸ“Š Mi resumen de hoy"
             ])
 
             with tab_mis_a:
@@ -1880,7 +1902,7 @@ if perfil == "Analista":
                     mis_a = df_impl_a.copy()
 
                 # Excluir completados y abandonados
-                mis_a = mis_a[~mis_a.get("estado_impl", pd.Series(dtype=str)).astype(str).str.contains("Completó|Abandona", na=False)]
+                mis_a = mis_a[~mis_a.get("estado_impl", pd.Series(dtype=str)).astype(str).str.contains("CompletÃ³|Abandona", na=False)]
                 mis_a = mis_a[mis_a.get("proxima_gestion_impl", pd.Series(dtype=str)).astype(str).str.upper() != "NO_VOLVER"]
 
                 def disp_impl_a(v):
@@ -1891,7 +1913,7 @@ if perfil == "Analista":
                 if "proxima_gestion_impl" in mis_a.columns:
                     mis_a = mis_a[mis_a["proxima_gestion_impl"].apply(disp_impl_a)]
 
-                # Gestionados hoy en CUALQUIER módulo
+                # Gestionados hoy en CUALQUIER mÃ³dulo
                 gestionados_hoy_a = _get_gestionados_hoy_todos()
                 if not hist_impl_a.empty:
                     hh_a = hist_impl_a.copy()
@@ -1908,7 +1930,7 @@ if perfil == "Analista":
                     pendientes_a = mis_a[~mis_a["_ya_hoy"]].copy()
                     ya_gest_a    = mis_a[mis_a["_ya_hoy"]].copy()
                 else:
-                    # DataFrame vacío con columnas mínimas para que el resto no falle
+                    # DataFrame vacÃ­o con columnas mÃ­nimas para que el resto no falle
                     _empty_cols = list(df_impl_a.columns) if df_impl_a is not None else ["identificacion"]
                     pendientes_a = pd.DataFrame(columns=_empty_cols)
                     ya_gest_a    = pd.DataFrame(columns=_empty_cols)
@@ -1918,7 +1940,7 @@ if perfil == "Analista":
                     if "_ya_hoy" in _df_tmp.columns:
                         _df_tmp.drop(columns=["_ya_hoy"], inplace=True)
 
-                orden_a = {"🔴 ALTA":0,"🟡 MEDIA":1,"🟢 BAJA":2}
+                orden_a = {"ðŸ”´ ALTA":0,"ðŸŸ¡ MEDIA":1,"ðŸŸ¢ BAJA":2}
                 if not pendientes_a.empty and "prioridad_impl" in pendientes_a.columns:
                     pendientes_a = pendientes_a.copy()
                     pendientes_a["_ord"] = pendientes_a["prioridad_impl"].map(orden_a).fillna(3)
@@ -1927,21 +1949,21 @@ if perfil == "Analista":
                 hechas_impl_a = st.session_state.get("impl_hechas_a", 0)
                 pend_n_a = len(pendientes_a)
                 pct_impl_a = int(hechas_impl_a / max(hechas_impl_a + pend_n_a, 1) * 100)
-                st.progress(pct_impl_a, text=f"Progreso Implementación: {hechas_impl_a} gestionados · {pend_n_a} pendientes")
+                st.progress(pct_impl_a, text=f"Progreso ImplementaciÃ³n: {hechas_impl_a} gestionados Â· {pend_n_a} pendientes")
 
                 if not ya_gest_a.empty:
-                    with st.expander(f"⚠️ {len(ya_gest_a)} ya gestionados hoy en otro módulo"):
+                    with st.expander(f"âš ï¸ {len(ya_gest_a)} ya gestionados hoy en otro mÃ³dulo"):
                         cols_dup_a = [c for c in ["identificacion","nombre","celular","total_cargues","prioridad_impl"] if c in ya_gest_a.columns]
                         st.dataframe(ya_gest_a[cols_dup_a], use_container_width=True, hide_index=True)
 
                 cols_v_a = [c for c in ["identificacion","nombre","celular","zona","vehiculo_norm",
                                          "total_cargues","cargues_faltantes","prioridad_impl","estado_impl"]
                             if c in pendientes_a.columns]
-                st.markdown(f"#### 📋 Pendientes ({pend_n_a})")
+                st.markdown(f"#### ðŸ“‹ Pendientes ({pend_n_a})")
                 st.dataframe(pendientes_a[cols_v_a], use_container_width=True, hide_index=True)
 
                 st.markdown("---")
-                st.markdown("#### 📞 Registrar gestión")
+                st.markdown("#### ðŸ“ž Registrar gestiÃ³n")
                 # FIX: verificar columna identificacion antes de acceder
                 if "identificacion" in pendientes_a.columns:
                     todos_ids_a = pendientes_a["identificacion"].astype(str).tolist()
@@ -1951,16 +1973,16 @@ if perfil == "Analista":
                     todos_ids_a += ya_gest_a["identificacion"].astype(str).tolist()
 
                 if not todos_ids_a:
-                    st.info("✅ Sin aliados pendientes de Implementación.")
+                    st.info("âœ… Sin aliados pendientes de ImplementaciÃ³n.")
                 else:
                     with st.form("form_impl_analista", clear_on_submit=True):
                         ci1, ci2 = st.columns(2)
                         with ci1:
-                            ali_ia = st.selectbox("Cédula del aliado", todos_ids_a, key="ali_impl_ana")
+                            ali_ia = st.selectbox("CÃ©dula del aliado", todos_ids_a, key="ali_impl_ana")
                             res_ia = st.selectbox("Resultado de la llamada", RESULTADOS_IMPL, key="res_impl_ana")
                         with ci2:
                             est_ia = st.selectbox("Estado", ["-"] + ESTADOS_IMPL, key="est_impl_ana")
-                            raz_ia = st.selectbox("Razón", ["-"] + RAZONES_IMPL, key="raz_impl_ana")
+                            raz_ia = st.selectbox("RazÃ³n", ["-"] + RAZONES_IMPL, key="raz_impl_ana")
 
                         fd_ia = mis_a[mis_a["identificacion"].astype(str) == str(ali_ia)]
                         if fd_ia.empty:
@@ -1975,15 +1997,15 @@ if perfil == "Analista":
                             for i, cn in enumerate(ficha_cols_a):
                                 cols_fia[i % 4].metric(cn.replace("_", " ").title(), str(f_ia[cn]))
                             if str(ali_ia) in gestionados_hoy_a:
-                                st.warning("⚠️ Este aliado ya fue gestionado hoy en otro módulo.")
+                                st.warning("âš ï¸ Este aliado ya fue gestionado hoy en otro mÃ³dulo.")
 
                         obs_ia = st.text_area("Observaciones", key="obs_impl_ana")
-                        sub_ia = st.form_submit_button("💾 GUARDAR GESTIÓN IMPLEMENTACIÓN")
+                        sub_ia = st.form_submit_button("ðŸ’¾ GUARDAR GESTIÃ“N IMPLEMENTACIÃ“N")
 
                     if sub_ia:
                         er_ia = None if est_ia == "-" else est_ia
                         rr_ia = None if raz_ia == "-" else raz_ia
-                        if res_ia == "Sí contestó" and er_ia is None:
+                        if res_ia == "SÃ­ contestÃ³" and er_ia is None:
                             st.error("Selecciona el estado del aliado.")
                         else:
                             tc_ia = int(fd_ia.iloc[0].get("total_cargues", 0)) if not fd_ia.empty else 0
@@ -1997,22 +2019,22 @@ if perfil == "Analista":
                                 "total_cargues_momento": tc_ia,
                             })
                             st.session_state["impl_hechas_a"] = st.session_state.get("impl_hechas_a", 0) + 1
-                            if str(er_ia) == "Llegó al 20mo cargue" or tc_ia >= CARGUES_META_IMPL:
-                                st.success(f"🏆 ¡{ali_ia} completó los 20 cargues! Pasa a Programación.")
+                            if str(er_ia) == "LlegÃ³ al 20mo cargue" or tc_ia >= CARGUES_META_IMPL:
+                                st.success(f"ðŸ† Â¡{ali_ia} completÃ³ los 20 cargues! Pasa a ProgramaciÃ³n.")
                             else:
-                                st.success(f"✅ Guardado para {ali_ia}.")
+                                st.success(f"âœ… Guardado para {ali_ia}.")
                             st.rerun()
 
             with tab_bus_a:
-                st.subheader("🔍 Buscar aliado en Implementación")
-                cedula_bia = st.text_input("Cédula", "", key="impl_buscar_ana")
+                st.subheader("ðŸ” Buscar aliado en ImplementaciÃ³n")
+                cedula_bia = st.text_input("CÃ©dula", "", key="impl_buscar_ana")
                 if cedula_bia.strip():
                     fila_bia = df_impl_a[df_impl_a["identificacion"].astype(str) == cedula_bia.strip()]
                     if fila_bia.empty:
-                        st.warning(f"No se encontró {cedula_bia} en la base de Implementación.")
+                        st.warning(f"No se encontrÃ³ {cedula_bia} en la base de ImplementaciÃ³n.")
                     else:
                         f_bia = fila_bia.iloc[0]
-                        st.success("✅ Aliado encontrado")
+                        st.success("âœ… Aliado encontrado")
                         cols_bia = [c for c in ["identificacion","nombre","celular","zona","vehiculo",
                                                  "total_cargues","cargues_faltantes","fecha_ultimo_cargue",
                                                  "estado_impl","intentos_impl","proxima_gestion_impl","analista_impl"]
@@ -2029,49 +2051,135 @@ if perfil == "Analista":
                         if not hist_impl_a.empty:
                             h_bia = hist_impl_a[hist_impl_a["identificacion"].astype(str) == cedula_bia.strip()].copy()
                             if h_bia.empty:
-                                st.info("Sin gestiones en Implementación para este aliado.")
+                                st.info("Sin gestiones en ImplementaciÃ³n para este aliado.")
                             else:
                                 h_bia["Hora"] = h_bia["fecha"].dt.strftime("%d/%m/%Y %I:%M %p")
                                 st.dataframe(
                                     h_bia[["Hora","analista","resultado","estado","razon","obs","total_cargues_momento"]].rename(
                                         columns={"analista":"Analista","resultado":"Resultado","estado":"Estado",
-                                                 "razon":"Razón","obs":"Obs","total_cargues_momento":"Cargues"}
+                                                 "razon":"RazÃ³n","obs":"Obs","total_cargues_momento":"Cargues"}
                                     ), use_container_width=True, hide_index=True
                                 )
 
             with tab_hoy_a:
-                st.subheader(f"Mi resumen de Implementación hoy — {now_col().strftime('%d/%m/%Y')}")
-                if st.button("🔄 Actualizar", key="impl_ref_ana_hoy"):
+                st.subheader(f"Mi resumen de ImplementaciÃ³n hoy â€” {now_col().strftime('%d/%m/%Y')}")
+                if st.button("ðŸ”„ Actualizar", key="impl_ref_ana_hoy"):
                     _get_hist_impl(force=True); st.rerun()
                 if hist_impl_a.empty:
-                    st.info("Sin gestiones de Implementación registradas aún.")
+                    st.info("Sin gestiones de ImplementaciÃ³n registradas aÃºn.")
                 else:
                     mh_ia = hist_impl_a[
                         (hist_impl_a["analista"] == nombre) &
                         (hist_impl_a["fecha"].dt.date == now_col().date())
                     ].copy()
                     if mh_ia.empty:
-                        st.info("Sin gestiones hoy en Implementación. ¡Empieza en Mis Aliados!")
+                        st.info("Sin gestiones hoy en ImplementaciÃ³n. Â¡Empieza en Mis Aliados!")
                     else:
                         t_ia  = len(mh_ia)
-                        sc_ia = len(mh_ia[mh_ia["resultado"] == "Sí contestó"])
+                        sc_ia = len(mh_ia[mh_ia["resultado"] == "SÃ­ contestÃ³"])
                         nr_ia = len(mh_ia[mh_ia["resultado"].isin(NO_RESP_IMPL)])
                         c7_ia = len(mh_ia[mh_ia["estado"].astype(str).str.contains("20mo cargue", na=False)])
                         ci1h, ci2h, ci3h, ci4h = st.columns(4)
-                        ci1h.metric("📞 Llamadas", t_ia)
-                        ci2h.metric("✅ Contactados", sc_ia)
-                        ci3h.metric("📵 No resp.", nr_ia)
-                        ci4h.metric("🏆 Llegaron R20", c7_ia)
+                        ci1h.metric("ðŸ“ž Llamadas", t_ia)
+                        ci2h.metric("âœ… Contactados", sc_ia)
+                        ci3h.metric("ðŸ“µ No resp.", nr_ia)
+                        ci4h.metric("ðŸ† Llegaron R20", c7_ia)
                         st.markdown("---")
                         mh_ia["Hora"] = mh_ia["fecha"].dt.strftime("%I:%M %p")
                         st.dataframe(
                             mh_ia[["Hora","identificacion","resultado","estado","razon","obs"]].rename(
-                                columns={"identificacion":"Cédula","resultado":"Resultado",
-                                         "estado":"Estado","razon":"Razón","obs":"Obs"}
+                                columns={"identificacion":"CÃ©dula","resultado":"Resultado",
+                                         "estado":"Estado","razon":"RazÃ³n","obs":"Obs"}
                             ), use_container_width=True, hide_index=True
                         )
                         st.download_button(
-                            "📥 Descargar hoy Implementación",
+                            "ðŸ“¥ Descargar hoy ImplementaciÃ³n",
                             mh_ia.to_csv(index=False).encode("utf-8"),
                             f"impl_hoy_{now_col().date()}.csv", "text/csv"
                         )
+
+# ================================================================
+# IMPLEMENTACIÃ“N â€” MÃ“DULO INDEPENDIENTE
+# ================================================================
+if perfil == "ImplementaciÃ³n":
+  st.title("âš™ï¸ GestiÃ³n de Aliados â€” ImplementaciÃ³n")
+  st.caption("MÃ³dulo independiente para el seguimiento de aliados entre R7 y R20.")
+  df_impl = _get_impl()
+  hist_impl = _get_hist_impl()
+
+  if df_impl is None or "identificacion" not in df_impl.columns:
+      st.warning("La base de ImplementaciÃ³n no estÃ¡ cargada o no tiene una columna de identificaciÃ³n vÃ¡lida.")
+      st.stop()
+
+  if es_coord_impl:
+      tab_res, tab_carga = st.tabs(["ðŸ“Š Resumen", "ðŸ“¤ Cargar base"])
+      with tab_res:
+          if st.button("ðŸ”„ Actualizar", key="impl_separado_actualizar"):
+              df_impl = _get_impl(force=True)
+              hist_impl = _get_hist_impl(force=True)
+              st.rerun()
+          activos = df_impl[~df_impl.get("estado_impl", pd.Series("", index=df_impl.index)).astype(str).str.contains("Abandona", na=False)]
+          c1, c2, c3 = st.columns(3)
+          c1.metric("Aliados en seguimiento", len(activos))
+          c2.metric("Total base", len(df_impl))
+          c3.metric("Gestiones registradas", len(hist_impl))
+          columnas = [c for c in ["identificacion", "nombre", "celular", "zona", "vehiculo_norm", "total_cargues", "cargues_faltantes", "prioridad_impl", "estado_impl", "analista_impl"] if c in df_impl.columns]
+          st.dataframe(df_impl[columnas], use_container_width=True, hide_index=True)
+      with tab_carga:
+          modo_impl = st.radio("Modo de carga", ["Incremental", "Reemplazar toda la base"], key="impl_separado_modo")
+          archivo_impl = st.file_uploader("Archivo Excel (.xlsx)", type=["xlsx"], key="impl_separado_archivo")
+          if archivo_impl:
+              try:
+                  nuevo = pd.read_excel(archivo_impl, engine="openpyxl")
+                  nuevo = nuevo[[c for c in nuevo.columns if not str(c).startswith("Unnamed")]]
+                  st.dataframe(nuevo.head(), use_container_width=True)
+                  if st.button("ðŸš€ Procesar base de ImplementaciÃ³n", key="impl_separado_procesar"):
+                      n, a, completados = cargar_base_implementacion(nuevo, modo="incremental" if modo_impl == "Incremental" else "reemplazar")
+                      st.success(f"âœ… {n} nuevos Â· {a} actualizados Â· {completados} alcanzaron R20.")
+              except Exception as e:
+                  st.error(f"Error leyendo el archivo: {e}")
+  else:
+      tab_gestion, tab_buscar, tab_hoy = st.tabs(["ðŸ“ž Mis aliados", "ðŸ” Buscar aliado", "ðŸ“Š Mi resumen"])
+      with tab_gestion:
+          mis = df_impl.copy()
+          if "analista_impl" in mis.columns:
+              mis = mis[mis["analista_impl"].astype(str) == nombre]
+          estado_impl = mis.get("estado_impl", pd.Series("", index=mis.index)).astype(str)
+          prox_impl = mis.get("proxima_gestion_impl", pd.Series("", index=mis.index)).astype(str).str.upper()
+          mis = mis[~estado_impl.str.contains("CompletÃ³|Abandona", na=False) & (prox_impl != "NO_VOLVER")]
+          ids = mis["identificacion"].astype(str).tolist()
+          columnas = [c for c in ["identificacion", "nombre", "celular", "zona", "vehiculo_norm", "total_cargues", "cargues_faltantes", "prioridad_impl"] if c in mis.columns]
+          st.dataframe(mis[columnas], use_container_width=True, hide_index=True)
+          if not ids:
+              st.info("No tienes aliados pendientes de ImplementaciÃ³n.")
+          else:
+              with st.form("impl_separado_gestion", clear_on_submit=True):
+                  aliado = st.selectbox("CÃ©dula del aliado", ids)
+                  resultado = st.selectbox("Resultado", RESULTADOS_IMPL)
+                  estado = st.selectbox("Estado", ["-"] + ESTADOS_IMPL)
+                  razon = st.selectbox("RazÃ³n", ["-"] + RAZONES_IMPL)
+                  obs = st.text_area("Observaciones")
+                  guardar = st.form_submit_button("ðŸ’¾ Guardar gestiÃ³n")
+              if guardar:
+                  estado = None if estado == "-" else estado
+                  razon = None if razon == "-" else razon
+                  if resultado == "SÃ­ contestÃ³" and estado is None:
+                      st.error("Selecciona el estado del aliado.")
+                  else:
+                      fila = mis[mis["identificacion"].astype(str) == aliado].iloc[0]
+                      guardar_gestion_impl({"analista": nombre, "identificacion": aliado, "resultado": resultado, "estado": estado, "razon": razon, "obs": obs, "total_cargues_momento": fila.get("total_cargues", 0)})
+                      st.success("âœ… GestiÃ³n guardada.")
+                      st.rerun()
+      with tab_buscar:
+          consulta = st.text_input("CÃ©dula", key="impl_separado_buscar")
+          if consulta.strip():
+              hallado = df_impl[df_impl["identificacion"].astype(str) == consulta.strip()]
+              if hallado.empty:
+                  st.warning("Aliado no encontrado en ImplementaciÃ³n.")
+              else:
+                  st.dataframe(hallado, use_container_width=True, hide_index=True)
+      with tab_hoy:
+          hoy = hist_impl[(hist_impl["analista"] == nombre) & (hist_impl["fecha"].dt.date == now_col().date())].copy()
+          st.metric("Gestiones de hoy", len(hoy))
+          if not hoy.empty:
+              st.dataframe(hoy, use_container_width=True, hide_index=True)
