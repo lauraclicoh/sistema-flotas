@@ -48,6 +48,19 @@ NO_VOLVER_ESTADOS = ["Aliado Rechaza la oferta","Empleado","Point"]
 NO_VOLVER_RAZONES = ["No le interesa / cuestiones personales"]
 COLS_CRM = ["intentos","ultimo_resultado","ultimo_estado","ultima_razon","fecha_gestion","proxima_gestion"]
 
+# Una única fuente de verdad para el acceso de coordinación. Configure
+# `coordinator_password` en secrets.toml; ambos módulos la consumen aquí.
+COORDINATOR_PASSWORD = st.secrets.get("coordinator_password", "clicoh")
+
+def excluir_aliados_inactivos(df: pd.DataFrame) -> pd.DataFrame:
+    """Devuelve únicamente aliados operables según la columna Estado de BASE."""
+    if df is None or df.empty:
+        return df
+    if "estado" not in df.columns:
+        return df
+    estado = df["estado"].fillna("").astype(str).str.strip().str.casefold()
+    return df.loc[estado != "inactivo"].copy()
+
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive",
@@ -198,6 +211,9 @@ def _get_base():
                 df["zona"] = df["municipio"]
             if "zona" not in df.columns:
                 df["zona"] = "Sin zona"
+            # El filtro se aplica inmediatamente después de consultar BASE,
+            # antes de que el aliado pueda llegar a pools, búsquedas o KPI.
+            df = excluir_aliados_inactivos(df)
             df["vehiculo_norm"] = df["vehiculo"].apply(_norm_vh) if "vehiculo" in df.columns else "Sin vehículo"
             df["dias"] = 0
             col_f = next((c for c in ["fecha_ultimo_cargue","fecha ultimo cargue","fechaultimocargue"]
@@ -272,6 +288,9 @@ def calcular_proxima(resultado, estado, razon, intentos):
     return hoy + timedelta(days=3)
 
 def filtrar_pool(df):
+    df = excluir_aliados_inactivos(df)
+    if df is None:
+        return df
     if "proxima_gestion" not in df.columns: return df
     df = df.copy()
     df = df[df["proxima_gestion"].astype(str).str.upper() != "NO_VOLVER"]
@@ -460,6 +479,7 @@ def procesar_incremental(df_nuevo):
     df_nuevo["identificacion"] = df_nuevo["identificacion"].str.strip()
     df_nuevo = df_nuevo.fillna("")
     if base_actual.empty:
+        df_nuevo = excluir_aliados_inactivos(df_nuevo)
         for col in COLS_CRM:
             df_nuevo[col] = "0" if col == "intentos" else ""
         reemplazar_hoja("BASE", df_nuevo)
@@ -501,6 +521,9 @@ def procesar_incremental(df_nuevo):
     base_final = pd.concat([base_actualizada, nuevos], ignore_index=True)
     base_final = base_final.fillna("")
     base_final = base_final.loc[:, ~base_final.columns.duplicated()]
+    # También se excluyen de la persistencia durante la sincronización:
+    # los nuevos inactivos no ingresan y los que cambiaron a Inactivo salen.
+    base_final = excluir_aliados_inactivos(base_final)
     reemplazar_hoja("BASE", base_final)
     _invalidar_base()
     return len(nuevos), len(existentes_datos)
@@ -535,9 +558,9 @@ def guardar_reparto(df):
 # ================================================================
 
 CARGUES_META_IMPL = 7
-PASS_IMPL_COORD   = "impl_coord"
-PASS_IMPL_ANA     = "impl2024"
-ANALISTAS_IMPL    = ["Analista Impl 1","Analista Impl 2","Analista Impl 3","Analista Impl 4"]
+# Implementación comparte exactamente los mismos usuarios analistas que
+# Programación y no tiene una contraseña independiente.
+ANALISTAS_IMPL    = NOMBRES_ANALISTAS
 
 RESULTADOS_IMPL = ["Apagado","Fuera de servicio","No contestó","Número errado","Sí contestó"]
 ESTADOS_IMPL = [
@@ -772,7 +795,7 @@ with st.sidebar:
 
     if perfil == "Coordinador":
         pwd = st.text_input("Contraseña", type="password")
-        if pwd != "clicoh":
+        if pwd != COORDINATOR_PASSWORD:
             if pwd: st.error("Contraseña incorrecta")
             st.stop()
         st.success("✅ Coordinador")
@@ -786,18 +809,14 @@ with st.sidebar:
         st.markdown("#### ⚙️ Implementación")
         rol_impl = st.selectbox("Rol", ["— Selecciona —","Coordinador Impl","Analista Impl"], key="rol_impl")
         if rol_impl == "Coordinador Impl":
-            pwd_i = st.text_input("Contraseña coordinador impl", type="password", key="pwd_ic")
-            if pwd_i != PASS_IMPL_COORD:
+            pwd_i = st.text_input("Contraseña de coordinador", type="password", key="pwd_ic")
+            if pwd_i != COORDINATOR_PASSWORD:
                 if pwd_i: st.error("Contraseña incorrecta")
                 st.stop()
             st.success("✅ Coordinador Implementación")
-            nombre = "CoordImpl"
+            nombre = "Coordinador"
         elif rol_impl == "Analista Impl":
             nombre = st.selectbox("¿Quién eres?", ANALISTAS_IMPL, key="nom_impl")
-            pwd_a = st.text_input("Contraseña", type="password", key="pwd_ia")
-            if pwd_a != PASS_IMPL_ANA:
-                if pwd_a: st.error("Contraseña incorrecta")
-                st.stop()
             st.success(f"✅ {nombre}")
         else:
             st.info("Selecciona tu rol.")
@@ -1012,8 +1031,10 @@ if perfil == "Coordinador":
                     confirmar=st.checkbox("Entiendo que se borrará todo el historial CRM")
                     if confirmar and st.button("♻️ Reemplazar base completa"):
                         with st.spinner("Subiendo..."):
-                            reemplazar_hoja("BASE", df_s); _invalidar_base()
-                        st.success(f"✅ {len(df_s):,} aliados subidos.")
+                            base_operable = excluir_aliados_inactivos(df_s)
+                            excluidos = len(df_s) - len(base_operable)
+                            reemplazar_hoja("BASE", base_operable); _invalidar_base()
+                        st.success(f"✅ {len(base_operable):,} aliados subidos · {excluidos:,} inactivos excluidos.")
             except Exception as e:
                 st.error(f"Error leyendo el archivo: {e}")
         if base is not None:
@@ -1323,7 +1344,7 @@ if perfil == "Implementación":
     st.markdown("## ⚙️ Módulo Implementación")
     st.caption("Seguimiento de aliados del 2do al 7mo cargue")
 
-    if nombre == "CoordImpl":
+    if nombre == "Coordinador":
         # ── COORDINADOR IMPLEMENTACIÓN ──────────────────────
         df_impl = _get_impl()
         hist_impl = _get_hist_impl()
