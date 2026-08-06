@@ -501,6 +501,13 @@ def procesar_incremental(df_nuevo):
     df_nuevo = _df_safe_str(df_nuevo)
     df_nuevo["identificacion"] = df_nuevo["identificacion"].str.strip()
     df_nuevo = df_nuevo.fillna("")
+    # Si el archivo trae la misma cédula en más de una fila, nos quedamos con
+    # la última (la más reciente) para evitar el error de pandas
+    # "Update not allowed with duplicate indexes on other".
+    dup_en_archivo = int(df_nuevo["identificacion"].duplicated().sum())
+    if dup_en_archivo > 0:
+        st.warning(f"⚠️ El archivo tenía {dup_en_archivo} cédula(s) repetida(s); se conservó el registro más reciente de cada una.")
+        df_nuevo = df_nuevo.drop_duplicates(subset="identificacion", keep="last")
     if base_actual.empty:
         df_nuevo = excluir_aliados_inactivos(df_nuevo)
         for col in COLS_CRM:
@@ -521,6 +528,10 @@ def procesar_incremental(df_nuevo):
             return 0, 0
     base_actual["identificacion"] = base_actual["identificacion"].str.strip()
     base_actual = base_actual.fillna("")
+    dup_en_base = int(base_actual["identificacion"].duplicated().sum())
+    if dup_en_base > 0:
+        st.warning(f"⚠️ La base guardada tenía {dup_en_base} cédula(s) repetida(s); se conservó el registro más reciente de cada una.")
+        base_actual = base_actual.drop_duplicates(subset="identificacion", keep="last")
     ids_viejos = set(base_actual["identificacion"].unique())
     nuevos = df_nuevo[~df_nuevo["identificacion"].isin(ids_viejos)].copy()
     for col in COLS_CRM:
@@ -839,6 +850,10 @@ def cargar_base_implementacion(df_nuevo):
     df_nuevo = df_nuevo.rename(columns={k: v for k, v in ALIAS_COLUMNAS_IMPL.items()
                                          if k in df_nuevo.columns and v not in df_nuevo.columns})
     df_nuevo["identificacion"] = df_nuevo["identificacion"].astype(str).str.strip()
+    dup_arch_impl = int(df_nuevo["identificacion"].duplicated().sum())
+    if dup_arch_impl > 0:
+        st.warning(f"⚠️ El archivo tenía {dup_arch_impl} cédula(s) repetida(s); se conservó el registro más reciente de cada una.")
+        df_nuevo = df_nuevo.drop_duplicates(subset="identificacion", keep="last")
     base = leer_hoja("BASE_IMPLEMENTACION")
     CRM_COLS = ["estado_impl","analista_impl","intentos_impl","proxima_gestion_impl",
                 "ultimo_resultado_impl","ultimo_estado_impl","ultima_razon_impl","fecha_ingreso_impl"]
@@ -852,6 +867,10 @@ def cargar_base_implementacion(df_nuevo):
         return len(df_nuevo), 0, 0
     base.columns = (base.columns.str.strip().str.lower().str.replace(r"\s+","_",regex=True))
     base["identificacion"] = base["identificacion"].astype(str).str.strip()
+    dup_base_impl = int(base["identificacion"].duplicated().sum())
+    if dup_base_impl > 0:
+        st.warning(f"⚠️ BASE_IMPLEMENTACION tenía {dup_base_impl} cédula(s) repetida(s); se conservó el registro más reciente de cada una.")
+        base = base.drop_duplicates(subset="identificacion", keep="last")
     if "total_cargues" not in base.columns: base["total_cargues"] = 0
     base["total_cargues"] = pd.to_numeric(base["total_cargues"], errors="coerce").fillna(0).astype(int)
     ids_existentes = set(base["identificacion"].unique())
