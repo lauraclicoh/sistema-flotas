@@ -651,8 +651,10 @@ def _get_impl(force=False):
                     return None
             df["identificacion"] = df["identificacion"].astype(str).str.strip()
             df["vehiculo_norm"] = df["vehiculo"].apply(_norm_vh) if "vehiculo" in df.columns else "Sin vehículo"
-            df["total_cargues"] = pd.to_numeric(df.get("total_cargues", 0), errors="coerce").fillna(0).astype(int)
-            df["intentos_impl"] = pd.to_numeric(df.get("intentos_impl", 0), errors="coerce").fillna(0).astype(int)
+            if "total_cargues" not in df.columns: df["total_cargues"] = 0
+            df["total_cargues"] = pd.to_numeric(df["total_cargues"], errors="coerce").fillna(0).astype(int)
+            if "intentos_impl" not in df.columns: df["intentos_impl"] = 0
+            df["intentos_impl"] = pd.to_numeric(df["intentos_impl"], errors="coerce").fillna(0).astype(int)
             df["cargues_faltantes"] = (CARGUES_META_IMPL - df["total_cargues"]).clip(lower=0)
             df["prioridad_impl"]    = df["total_cargues"].apply(_prio_impl)
             if "zona" not in df.columns: df["zona"] = "Sin zona"
@@ -1107,7 +1109,8 @@ if perfil == "Coordinador":
             c3.metric("⏸ En pausa",len(paus)); c4.metric("🚫 Bloqueados",len(nv))
             if "estado_pipeline" in base.columns:
                 fidelizados = base[base["estado_pipeline"]=="🏅 Fidelizado"]
-                inactivos_n = base[base.get("estado_aliado","")=="🔴 Inactivo"]
+                col_estado_aliado = base["estado_aliado"] if "estado_aliado" in base.columns else pd.Series([""]*len(base), index=base.index)
+                inactivos_n = base[col_estado_aliado=="🔴 Inactivo"]
                 c5,c6=st.columns(2)
                 c5.metric("🏅 Fidelizados (≥20 rutas)",len(fidelizados))
                 c6.metric("🔴 Marcados Inactivo",len(inactivos_n))
@@ -1147,7 +1150,10 @@ if perfil == "Coordinador":
                     if confirmar and st.button("♻️ Reemplazar base completa"):
                         with st.spinner("Subiendo..."):
                             base_operable = excluir_aliados_inactivos(df_s)  # ahora clasifica, no excluye
-                            n_inactivos = int((base_operable.get("estado_aliado","")=="🔴 Inactivo").sum()) if base_operable is not None else 0
+                            if base_operable is not None and "estado_aliado" in base_operable.columns:
+                                n_inactivos = int((base_operable["estado_aliado"]=="🔴 Inactivo").sum())
+                            else:
+                                n_inactivos = 0
                             reemplazar_hoja("BASE", base_operable); _invalidar_base()
                         st.success(f"✅ {len(base_operable):,} aliados subidos · {n_inactivos:,} marcados como 🔴 Inactivo (se pueden gestionar igual).")
             except Exception as e:
