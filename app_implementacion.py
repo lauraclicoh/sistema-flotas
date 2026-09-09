@@ -106,6 +106,22 @@ ALIAS_COORDINADOR = {
     "fecha último cargue": "fecha_ultimo_cargue",
 }
 
+# Alias de encabezados para las bases de Planeación y Requerimientos que sube el Coordinador.
+ALIAS_PLANEACION = {
+    "identificacion": "identificacion", "identificación": "identificacion", "cedula": "identificacion",
+    "cédula": "identificacion", "documento": "identificacion", "id": "identificacion",
+    "nombre": "nombre", "celular": "celular", "telefono": "celular", "teléfono": "celular",
+    "zona": "zona", "hub": "zona", "municipio": "zona",
+    "vehiculo": "vehiculo", "vehículo": "vehiculo", "analista": "analista",
+}
+ALIAS_REQUERIMIENTOS_BASE = {
+    "nombre": "nombre", "tel": "telefono", "telefono": "telefono", "teléfono": "telefono",
+    "vh": "vehiculo", "vehiculo": "vehiculo", "vehículo": "vehiculo",
+    "numero de requerimiento": "numero_requerimiento", "número de requerimiento": "numero_requerimiento",
+    "numero_requerimiento": "numero_requerimiento", "requerimiento": "numero_requerimiento",
+    "cantidad de rutas": "cantidad_rutas", "cantidad_rutas": "cantidad_rutas", "rutas": "cantidad_rutas",
+}
+
 # -------------------------------------------------------------------------
 # Nombres de hojas y columnas (las 6 hojas ya existentes en el libro)
 # -------------------------------------------------------------------------
@@ -475,6 +491,89 @@ def procesar_validacion_requerimiento(fila, uso_cupo, nota):
     return cambios, log
 
 
+def _leer_archivo_subido(archivo):
+    return pd.read_csv(archivo) if archivo.name.lower().endswith("csv") else pd.read_excel(archivo)
+
+
+def cargar_incremental_planeacion(archivo):
+    """
+    Sube/actualiza la base de Planeación por 'identificacion'. Si el aliado ya
+    existe, solo se actualizan sus datos de contacto (nombre/celular/zona/
+    vehiculo/analista) — el historial de gestión (intentos, categoría,
+    próxima gestión, bloqueo) NUNCA se toca. Si es nuevo, entra con CRM limpio.
+    """
+    df = _leer_archivo_subido(archivo)
+    df.columns = [str(c).strip().lower() for c in df.columns]
+    df = df.rename(columns={k: v for k, v in ALIAS_PLANEACION.items() if k in df.columns})
+    if "identificacion" not in df.columns:
+        st.error("El archivo no tiene columna de identificación (cédula/documento).")
+        return 0, 0
+    existente = _get_roster("plan_roster", "PLANEACION_ALIADOS", COLS_PLANEACION, forzar=True)
+    existentes_id = set(existente.identificacion.astype(str))
+    nuevos_n, actualizados_n = 0, 0
+    for _, fn in df.iterrows():
+        ident = str(fn.get("identificacion", "")).strip()
+        if not ident:
+            continue
+        datos = {c: fn.get(c, "") for c in ["nombre", "celular", "zona", "vehiculo", "analista"] if c in df.columns and str(fn.get(c, "")).strip()}
+        if ident in existentes_id:
+            idx = existente[existente.identificacion.astype(str) == ident].index[0]
+            for campo, valor in datos.items():
+                existente.loc[idx, campo] = valor
+            actualizados_n += 1
+        else:
+            nueva_fila = {c: "" for c in COLS_PLANEACION}
+            nueva_fila.update({
+                "identificacion": ident, **datos, "estado_planeacion": "Nuevo",
+                "intentos_llamada": 0, "intentos_sin_contacto": 0,
+                "proxima_gestion": now_col().date(), "bloqueado": False, "fecha_ingreso": now_col().date(),
+            })
+            existente = pd.concat([existente, pd.DataFrame([nueva_fila])], ignore_index=True)
+            existentes_id.add(ident)
+            nuevos_n += 1
+    reemplazar_hoja("PLANEACION_ALIADOS", existente)
+    st.session_state["plan_roster"] = existente
+    st.session_state["plan_roster_stale"] = False
+    return nuevos_n, actualizados_n
+
+
+def cargar_incremental_requerimientos(archivo):
+    """Igual que cargar_incremental_planeacion() pero para Requerimientos, clave = numero_requerimiento."""
+    df = _leer_archivo_subido(archivo)
+    df.columns = [str(c).strip().lower() for c in df.columns]
+    df = df.rename(columns={k: v for k, v in ALIAS_REQUERIMIENTOS_BASE.items() if k in df.columns})
+    if "numero_requerimiento" not in df.columns:
+        st.error("El archivo no tiene columna 'Número de requerimiento'.")
+        return 0, 0
+    existente = _get_roster("req_roster", "REQUERIMIENTOS_ALIADOS", COLS_REQUERIMIENTOS, forzar=True)
+    existentes_id = set(existente.numero_requerimiento.astype(str))
+    nuevos_n, actualizados_n = 0, 0
+    for _, fn in df.iterrows():
+        num = str(fn.get("numero_requerimiento", "")).strip()
+        if not num:
+            continue
+        datos = {c: fn.get(c, "") for c in ["nombre", "telefono", "vehiculo", "cantidad_rutas"] if c in df.columns and str(fn.get(c, "")).strip()}
+        if num in existentes_id:
+            idx = existente[existente.numero_requerimiento.astype(str) == num].index[0]
+            for campo, valor in datos.items():
+                existente.loc[idx, campo] = valor
+            actualizados_n += 1
+        else:
+            nueva_fila = {c: "" for c in COLS_REQUERIMIENTOS}
+            nueva_fila.update({
+                "numero_requerimiento": num, **datos, "estado_gestion": "Nuevo",
+                "intentos_llamada": 0, "intentos_sin_contacto": 0,
+                "proxima_gestion": now_col().date(), "bloqueado": False, "fecha_ingreso": now_col().date(),
+            })
+            existente = pd.concat([existente, pd.DataFrame([nueva_fila])], ignore_index=True)
+            existentes_id.add(num)
+            nuevos_n += 1
+    reemplazar_hoja("REQUERIMIENTOS_ALIADOS", existente)
+    st.session_state["req_roster"] = existente
+    st.session_state["req_roster_stale"] = False
+    return nuevos_n, actualizados_n
+
+
 # =========================================================================
 # LOGIN
 # =========================================================================
@@ -503,7 +602,7 @@ with st.sidebar:
 # =========================================================================
 if perfil == "Coordinador":
     tab_tablero, tab_carga, tab_hoy, tab_hist, tab_reglas = st.tabs(
-        ["📊 Tablero", "📥 Cargar Base Implementación", "📋 Gestión de Hoy", "📅 Histórico", "⚙️ Reglas"]
+        ["📊 Tablero", "📥 Cargar Bases", "📋 Gestión de Hoy", "📅 Histórico", "⚙️ Reglas"]
     )
 
     with tab_tablero:
@@ -556,8 +655,33 @@ if perfil == "Coordinador":
                 st.plotly_chart(px.pie(dist2, values="N", names="Estado Implementación", title="Distribución Estado Implementación"), use_container_width=True)
 
     with tab_carga:
-        st.info("Sube el archivo que envía el área de Implementación. Se actualiza por documento (no se duplica).")
-        archivo = st.file_uploader("Excel o CSV", type=["xlsx", "xls", "csv"])
+        st.caption("Todas las cargas son incrementales: si el aliado/requerimiento ya existe se actualizan sus datos de contacto, sin tocar el historial de gestión. Si es nuevo, se agrega.")
+
+        with st.expander("📋 Base de Gestión de Aliados (Planeación)", expanded=True):
+            st.caption("Columnas esperadas: Identificación, Nombre, Celular, Zona, Vehículo, Analista (opcional).")
+            archivo_plan = st.file_uploader("Excel o CSV", type=["xlsx", "xls", "csv"], key="up_plan")
+            if archivo_plan is not None and st.button("🚀 Cargar base de Planeación", key="btn_up_plan"):
+                try:
+                    with st.spinner("Procesando..."):
+                        nn, na = cargar_incremental_planeacion(archivo_plan)
+                    st.success(f"✅ {nn} aliados nuevos · {na} aliados actualizados")
+                except Exception as e:
+                    st.error(f"No se pudo procesar el archivo: {e}")
+
+        with st.expander("📨 Base de Requerimientos", expanded=False):
+            st.caption("Columnas esperadas: Nombre, TEL, VH, Número de requerimiento, cantidad de rutas.")
+            archivo_req = st.file_uploader("Excel o CSV", type=["xlsx", "xls", "csv"], key="up_req")
+            if archivo_req is not None and st.button("🚀 Cargar base de Requerimientos", key="btn_up_req"):
+                try:
+                    with st.spinner("Procesando..."):
+                        nn, na = cargar_incremental_requerimientos(archivo_req)
+                    st.success(f"✅ {nn} requerimientos nuevos · {na} actualizados")
+                except Exception as e:
+                    st.error(f"No se pudo procesar el archivo: {e}")
+
+        st.markdown("#### 🧑‍🏭 Base de Implementación (seguimiento a 20 rutas)")
+        st.caption("Columnas esperadas: Nombre, Documento, Celular, Ciudad, Vehículo, # Rutas, Estado clicOH, Estado Implementación, fecha último cargue.")
+        archivo = st.file_uploader("Excel o CSV", type=["xlsx", "xls", "csv"], key="up_impl")
         if archivo is not None:
             try:
                 nuevos = pd.read_csv(archivo) if archivo.name.lower().endswith("csv") else pd.read_excel(archivo)
@@ -694,34 +818,8 @@ if perfil == "Analista":
     # ------------------------------------------------------------------
     with tab_aliados:
         df_plan = _get_roster("plan_roster", "PLANEACION_ALIADOS", COLS_PLANEACION)
-
-        with st.expander("➕ Registrar aliado nuevo en Planeación", expanded=df_plan.empty):
-            with st.form("form_nuevo_planeacion"):
-                c1, c2, c3 = st.columns(3)
-                ident = c1.text_input("Identificación (cédula) *")
-                nombre_n = c2.text_input("Nombre *")
-                celular = c3.text_input("Celular *")
-                zona = c1.text_input("Zona / HUB")
-                vehiculo = c2.selectbox("Vehículo", VEHICULOS)
-                analista_n = c3.selectbox("Analista", NOMBRES_ANALISTAS, index=NOMBRES_ANALISTAS.index(nombre))
-                crear = st.form_submit_button("Guardar aliado")
-            if crear:
-                if not ident or not nombre_n or not celular:
-                    st.error("Identificación, nombre y celular son obligatorios.")
-                elif ident in df_plan.identificacion.astype(str).tolist():
-                    st.error("Ese aliado ya está registrado en Planeación.")
-                else:
-                    fila_nueva = {
-                        "identificacion": ident, "nombre": nombre_n, "celular": celular,
-                        "zona": zona, "vehiculo": vehiculo, "analista": analista_n,
-                        "estado_planeacion": "Nuevo", "categoria": "", "razon": "",
-                        "intentos_llamada": 0, "intentos_sin_contacto": 0, "ultimo_resultado": "",
-                        "proxima_gestion": now_col().date(), "bloqueado": False,
-                        "fecha_ingreso": now_col().date(), "ultima_gestion": "", "observaciones": "",
-                    }
-                    agregar_filas("PLANEACION_ALIADOS", [[_safe_str(fila_nueva.get(c, "")) for c in COLS_PLANEACION]])
-                    _agregar_local("plan_roster", fila_nueva, COLS_PLANEACION)
-                    st.rerun()
+        if df_plan.empty:
+            st.info("Coordinación todavía no ha cargado la base de Planeación.")
 
         st.markdown("### 🔎 Buscar aliado para gestionar")
         modo_busq = st.radio("Buscar por", ["Cédula", "Celular"], horizontal=True, key="modo_busq_plan")
@@ -801,33 +899,8 @@ if perfil == "Analista":
     # ------------------------------------------------------------------
     with tab_req:
         df_req = _get_roster("req_roster", "REQUERIMIENTOS_ALIADOS", COLS_REQUERIMIENTOS)
-
-        with st.expander("➕ Registrar requerimiento", expanded=df_req.empty):
-            with st.form("form_nuevo_requerimiento"):
-                c1, c2, c3 = st.columns(3)
-                numero = c1.text_input("Número de requerimiento *")
-                nombre_r = c2.text_input("Nombre *")
-                telefono = c3.text_input("Teléfono *")
-                vehiculo_r = c1.selectbox("Vehículo", VEHICULOS, key="veh_req")
-                rutas_r = c2.number_input("Cantidad de rutas", min_value=0, value=1, key="rutas_req")
-                crear = st.form_submit_button("Guardar requerimiento")
-            if crear:
-                if not numero or not nombre_r or not telefono:
-                    st.error("Número de requerimiento, nombre y teléfono son obligatorios.")
-                elif numero in df_req.numero_requerimiento.astype(str).tolist():
-                    st.error("Ya existe un requerimiento con ese número.")
-                else:
-                    fila_nueva = {
-                        "numero_requerimiento": numero, "nombre": nombre_r, "telefono": telefono,
-                        "vehiculo": vehiculo_r, "cantidad_rutas": rutas_r,
-                        "estado_gestion": "Nuevo", "ultimo_estado": "", "intentos_llamada": 0,
-                        "intentos_sin_contacto": 0, "ultimo_resultado": "",
-                        "proxima_gestion": now_col().date(), "bloqueado": False,
-                        "fecha_ingreso": now_col().date(), "ultima_gestion": "", "observaciones": "",
-                    }
-                    agregar_filas("REQUERIMIENTOS_ALIADOS", [[_safe_str(fila_nueva.get(c, "")) for c in COLS_REQUERIMIENTOS]])
-                    _agregar_local("req_roster", fila_nueva, COLS_REQUERIMIENTOS)
-                    st.rerun()
+        if df_req.empty:
+            st.info("Coordinación todavía no ha cargado la base de Requerimientos.")
 
         st.markdown("### 🔎 Buscar requerimiento para gestionar")
         modo_busq_r = st.radio("Buscar por", ["Número de requerimiento", "Teléfono"], horizontal=True, key="modo_busq_req")
