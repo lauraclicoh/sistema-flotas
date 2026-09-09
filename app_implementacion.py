@@ -80,16 +80,31 @@ RAZONES_VALIDACION_ALIADOS = {"Interesado carga hoy", "Se reserva"}
 # Catálogos: REQUERIMIENTOS SUPPLY
 # -------------------------------------------------------------------------
 ESTADOS_FINALES_REQ = [
-    "Aliado Contactado para primer cargue",
-    "Aliado Rechaza la oferta",
-    "Interesado Carga",
-    "Pendiente gestion area encargada",
-    "Requerimiento cerrado/finalizado",
-    "Aliado nunca lo usaron",
+    "Aliado rechaza la oferta",
+    "Carga en otra operación",
+    "Interesado en carga / reserva",
+    "Interesado esporádico, no fijo",
 ]
-BLOQUEO_INMEDIATO_REQ = {"Aliado Rechaza la oferta"}
-CIERRE_REQ = {"Requerimiento cerrado/finalizado", "Aliado nunca lo usaron"}
-VALIDACION_REQ = {"Aliado Contactado para primer cargue", "Interesado Carga"}
+RAZONES_REQ = [
+    "—",
+    "Interesado pendiente de cargue",
+    "No le interesa / cuestiones personales",
+    "No tiene vehículo / vehículo dañado",
+    "Peso / volumen / recorrido",
+    "Tarifa / pago",
+    "Tiene trabajo fijo",
+    "Fuera de la ciudad",
+    "Ocasional, no fijo",
+]
+BLOQUEO_INMEDIATO_REQ = {"Aliado rechaza la oferta"}
+RAZONES_BLOQUEO_REQ = {"No le interesa / cuestiones personales"}
+# Esta razón dispara la validación del día siguiente ("¿sí cargó?"), sin importar el estado final elegido.
+RAZONES_VALIDACION_REQ = {"Interesado pendiente de cargue"}
+
+# -------------------------------------------------------------------------
+# Área responsable del aliado (aplica a Planeación y a Requerimientos)
+# -------------------------------------------------------------------------
+AREA_ALIADO_OPCIONES = ["—", "Supply", "Fleet", "Programación"]
 
 # -------------------------------------------------------------------------
 # Catálogos: COORDINADOR (base que envía el área de Implementación)
@@ -116,6 +131,7 @@ ALIAS_PLANEACION = {
     "nombre": "nombre", "celular": "celular", "telefono": "celular", "teléfono": "celular",
     "zona": "zona", "hub": "zona", "municipio": "zona",
     "vehiculo": "vehiculo", "vehículo": "vehiculo", "analista": "analista",
+    "area": "area_aliado", "área": "area_aliado", "area del aliado": "area_aliado", "área del aliado": "area_aliado",
 }
 ALIAS_REQUERIMIENTOS_BASE = {
     "nombre": "nombre", "tel": "telefono", "telefono": "telefono", "teléfono": "telefono",
@@ -123,13 +139,14 @@ ALIAS_REQUERIMIENTOS_BASE = {
     "numero de requerimiento": "numero_requerimiento", "número de requerimiento": "numero_requerimiento",
     "numero_requerimiento": "numero_requerimiento", "requerimiento": "numero_requerimiento",
     "cantidad de rutas": "cantidad_rutas", "cantidad_rutas": "cantidad_rutas", "rutas": "cantidad_rutas",
+    "area": "area_aliado", "área": "area_aliado", "area del aliado": "area_aliado", "área del aliado": "area_aliado",
 }
 
 # -------------------------------------------------------------------------
 # Nombres de hojas y columnas (las 6 hojas ya existentes en el libro)
 # -------------------------------------------------------------------------
 COLS_PLANEACION = [
-    "identificacion", "nombre", "celular", "zona", "vehiculo", "analista",
+    "identificacion", "nombre", "celular", "zona", "vehiculo", "analista", "area_aliado",
     "estado_planeacion", "categoria", "razon",
     "intentos_llamada", "intentos_sin_contacto",
     "ultimo_resultado", "proxima_gestion",
@@ -138,11 +155,11 @@ COLS_PLANEACION = [
 COLS_PLANEACION_GESTIONES = ["fecha", "identificacion", "analista", "resultado", "estado_final", "razon", "proxima_gestion", "observaciones"]
 
 COLS_REQUERIMIENTOS = [
-    "numero_requerimiento", "nombre", "telefono", "vehiculo", "cantidad_rutas",
-    "estado_gestion", "ultimo_estado", "intentos_llamada", "intentos_sin_contacto",
+    "numero_requerimiento", "nombre", "telefono", "vehiculo", "cantidad_rutas", "area_aliado",
+    "estado_gestion", "ultimo_estado", "razon", "intentos_llamada", "intentos_sin_contacto",
     "ultimo_resultado", "proxima_gestion", "bloqueado", "fecha_ingreso", "ultima_gestion", "observaciones",
 ]
-COLS_REQUERIMIENTOS_GESTIONES = ["fecha", "telefono", "numero_requerimiento", "nombre", "resultado", "estado_final", "proxima_gestion", "observaciones"]
+COLS_REQUERIMIENTOS_GESTIONES = ["fecha", "telefono", "numero_requerimiento", "nombre", "resultado", "estado_final", "razon", "proxima_gestion", "observaciones"]
 
 COLS_COORDINADOR = [
     "documento", "nombre", "celular", "ciudad", "vehiculo", "rutas",
@@ -309,12 +326,52 @@ def es_verdadero(valor):
     return str(valor).strip().lower() in ("true", "1", "sí", "si", "yes")
 
 
+def _normalizar_tel(valor):
+    """
+    Deja solo dígitos y quita el '.0' que Excel/una carga vieja pudo haber
+    dejado en un teléfono o cédula. Se usa para BUSCAR, así encuentra el
+    aliado aunque el dato guardado tenga espacios, guiones o ese sufijo.
+    """
+    v = str(valor).strip()
+    if v.endswith(".0"):
+        v = v[:-2]
+    return "".join(ch for ch in v if ch.isdigit())
+
+
+def _asegurar_columnas(nombre_hoja, columnas):
+    """
+    Si la hoja ya existe pero al código le agregaron columnas nuevas
+    (p.ej. 'area_aliado', 'razon' en Requerimientos), las añade al final
+    del encabezado sin tocar los datos existentes.
+    """
+    try:
+        sh = conectar_sheets()
+        if sh is None:
+            return
+        ws = sh.worksheet(nombre_hoja)
+        headers = ws.row_values(1)
+        if not headers:
+            return
+        faltantes = [c for c in columnas if c not in headers]
+        for c in faltantes:
+            headers.append(c)
+            ws.update_cell(1, len(headers), c)
+    except gspread.WorksheetNotFound:
+        return
+    except Exception as e:
+        st.warning(f"No se pudieron verificar las columnas de {nombre_hoja}: {e}")
+
+
 # =========================================================================
 # CACHÉ EN SESIÓN  (mismo patrón que _get_base / _get_hist de Programación:
 # los "rosters" se invalidan solo al escribir; los históricos se refrescan
 # cada 30s o al forzar)
 # =========================================================================
 def _get_roster(cache_key, nombre_hoja, columnas, forzar=False):
+    check_key = f"{cache_key}_cols_ok"
+    if not st.session_state.get(check_key, False):
+        _asegurar_columnas(nombre_hoja, columnas)
+        st.session_state[check_key] = True
     stale_key = f"{cache_key}_stale"
     if forzar or cache_key not in st.session_state or st.session_state.get(stale_key, True):
         df = leer_hoja(nombre_hoja, columnas)
@@ -444,13 +501,13 @@ def procesar_validacion_planeacion(fila, cargo, nota):
     return cambios, log
 
 
-def procesar_gestion_requerimiento(fila, resultado, estado_final, nota):
+def procesar_gestion_requerimiento(fila, resultado, estado_final, razon, nota):
     hoy = now_col().date()
     intentos_llamada = a_entero(fila.get("intentos_llamada")) + 1
     intentos_sin_contacto = a_entero(fila.get("intentos_sin_contacto"))
     cambios = {"intentos_llamada": intentos_llamada, "ultimo_resultado": resultado,
                "ultima_gestion": now_col(), "observaciones": nota or fila.get("observaciones", "")}
-    estado_final_log = ""
+    estado_final_log, razon_log = "", ""
 
     if resultado in SIN_CONTACTO:
         intentos_sin_contacto += 1
@@ -458,21 +515,26 @@ def procesar_gestion_requerimiento(fila, resultado, estado_final, nota):
         cambios.update({"intentos_sin_contacto": intentos_sin_contacto, "estado_gestion": estado_gestion,
                          "bloqueado": bloqueado, "proxima_gestion": "" if bloqueado else hoy + timedelta(days=dias)})
     else:
-        estado_final_log = estado_final
-        if estado_final in BLOQUEO_INMEDIATO_REQ:
-            cambios.update({"estado_gestion": "Bloqueado permanente", "bloqueado": True, "proxima_gestion": "", "ultimo_estado": estado_final})
-        elif estado_final in CIERRE_REQ:
-            cambios.update({"estado_gestion": "Cerrado", "bloqueado": False, "proxima_gestion": "", "ultimo_estado": estado_final})
-        elif estado_final == "Pendiente gestion area encargada":
-            cambios.update({"estado_gestion": "Pendiente área encargada", "bloqueado": False, "proxima_gestion": hoy + timedelta(days=5), "ultimo_estado": estado_final})
-        elif estado_final in VALIDACION_REQ:
-            cambios.update({"estado_gestion": "Validación pendiente", "bloqueado": False, "proxima_gestion": hoy + timedelta(days=1), "ultimo_estado": estado_final})
+        estado_final_log, razon_log = estado_final, razon
+        if (estado_final in BLOQUEO_INMEDIATO_REQ) or (razon in RAZONES_BLOQUEO_REQ):
+            cambios.update({"estado_gestion": "Bloqueado permanente", "bloqueado": True, "proxima_gestion": "",
+                             "ultimo_estado": estado_final, "razon": razon})
+        elif razon in RAZONES_VALIDACION_REQ:
+            cambios.update({"estado_gestion": "Validación pendiente", "bloqueado": False,
+                             "proxima_gestion": hoy + timedelta(days=1), "ultimo_estado": estado_final, "razon": razon})
+        elif estado_final == "Carga en otra operación":
+            cambios.update({"estado_gestion": "Pausado", "bloqueado": False,
+                             "proxima_gestion": hoy + timedelta(days=5), "ultimo_estado": estado_final, "razon": razon})
+        elif estado_final == "Interesado esporádico, no fijo":
+            cambios.update({"estado_gestion": "En gestión", "bloqueado": False,
+                             "proxima_gestion": hoy + timedelta(days=3), "ultimo_estado": estado_final, "razon": razon})
         else:
-            cambios.update({"estado_gestion": "En gestión", "bloqueado": False, "proxima_gestion": hoy + timedelta(days=1), "ultimo_estado": estado_final})
+            cambios.update({"estado_gestion": "En gestión", "bloqueado": False,
+                             "proxima_gestion": hoy + timedelta(days=1), "ultimo_estado": estado_final, "razon": razon})
 
     log = {
         "fecha": now_col(), "telefono": fila.get("telefono"), "numero_requerimiento": fila.get("numero_requerimiento"),
-        "nombre": fila.get("nombre"), "resultado": resultado, "estado_final": estado_final_log,
+        "nombre": fila.get("nombre"), "resultado": resultado, "estado_final": estado_final_log, "razon": razon_log,
         "proxima_gestion": cambios.get("proxima_gestion", ""), "observaciones": nota,
     }
     return cambios, log
@@ -517,15 +579,17 @@ def cargar_incremental_planeacion(archivo):
     # al intentar meter un int en una columna de texto ("Invalid value ... for dtype 'str'").
     df = df.astype(str).replace("nan", "")
     existente = _get_roster("plan_roster", "PLANEACION_ALIADOS", COLS_PLANEACION, forzar=True)
-    existentes_id = set(existente.identificacion.astype(str))
+    existente_norm = existente.identificacion.apply(_normalizar_tel)
     nuevos_n, actualizados_n = 0, 0
     for _, fn in df.iterrows():
         ident = str(fn.get("identificacion", "")).strip()
-        if not ident:
+        ident_norm = _normalizar_tel(ident)
+        if not ident_norm:
             continue
-        datos = {c: str(fn.get(c, "")).strip() for c in ["nombre", "celular", "zona", "vehiculo", "analista"] if c in df.columns and str(fn.get(c, "")).strip()}
-        if ident in existentes_id:
-            idx = existente[existente.identificacion.astype(str) == ident].index[0]
+        datos = {c: str(fn.get(c, "")).strip() for c in ["nombre", "celular", "zona", "vehiculo", "analista", "area_aliado"] if c in df.columns and str(fn.get(c, "")).strip()}
+        coincide = existente_norm[existente_norm == ident_norm]
+        if not coincide.empty:
+            idx = coincide.index[0]
             for campo, valor in datos.items():
                 existente.loc[idx, campo] = valor
             actualizados_n += 1
@@ -537,7 +601,7 @@ def cargar_incremental_planeacion(archivo):
                 "proxima_gestion": now_col().date(), "bloqueado": False, "fecha_ingreso": now_col().date(),
             })
             existente = pd.concat([existente, pd.DataFrame([nueva_fila])], ignore_index=True)
-            existentes_id.add(ident)
+            existente_norm = pd.concat([existente_norm, pd.Series([ident_norm], index=[existente.index[-1]])])
             nuevos_n += 1
     reemplazar_hoja("PLANEACION_ALIADOS", existente)
     st.session_state["plan_roster"] = existente
@@ -559,15 +623,17 @@ def cargar_incremental_requerimientos(archivo):
         return 0, 0
     df = df.astype(str).replace("nan", "")
     existente = _get_roster("req_roster", "REQUERIMIENTOS_ALIADOS", COLS_REQUERIMIENTOS, forzar=True)
-    existentes_id = set(existente.telefono.astype(str))
+    existente_norm = existente.telefono.apply(_normalizar_tel)
     nuevos_n, actualizados_n = 0, 0
     for _, fn in df.iterrows():
         tel = str(fn.get("telefono", "")).strip()
-        if not tel:
+        tel_norm = _normalizar_tel(tel)
+        if not tel_norm:
             continue
-        datos = {c: str(fn.get(c, "")).strip() for c in ["nombre", "numero_requerimiento", "vehiculo", "cantidad_rutas"] if c in df.columns and str(fn.get(c, "")).strip()}
-        if tel in existentes_id:
-            idx = existente[existente.telefono.astype(str) == tel].index[0]
+        datos = {c: str(fn.get(c, "")).strip() for c in ["nombre", "numero_requerimiento", "vehiculo", "cantidad_rutas", "area_aliado"] if c in df.columns and str(fn.get(c, "")).strip()}
+        coincide = existente_norm[existente_norm == tel_norm]
+        if not coincide.empty:
+            idx = coincide.index[0]
             for campo, valor in datos.items():
                 existente.loc[idx, campo] = valor
             actualizados_n += 1
@@ -579,7 +645,7 @@ def cargar_incremental_requerimientos(archivo):
                 "proxima_gestion": now_col().date(), "bloqueado": False, "fecha_ingreso": now_col().date(),
             })
             existente = pd.concat([existente, pd.DataFrame([nueva_fila])], ignore_index=True)
-            existentes_id.add(tel)
+            existente_norm = pd.concat([existente_norm, pd.Series([tel_norm], index=[existente.index[-1]])])
             nuevos_n += 1
     reemplazar_hoja("REQUERIMIENTOS_ALIADOS", existente)
     st.session_state["req_roster"] = existente
@@ -803,10 +869,10 @@ if perfil == "Coordinador":
 | No contestó / Apagado / Fuera de servicio / Número errado | Recontacto | 1 día |
 | 10–14 intentos sin contacto (acumulado) | Pausa larga | 15 días |
 | 15+ intentos sin contacto (acumulado) | ❌ Bloqueo permanente | Nunca |
-| Interesado Carga/Reserva | Validar si cargó; si no, recontacto | 1 día |
-| Fleet no acepta HUB | Pausa | 5 días |
-| Interesado esporádico | Recontacto | 3 días |
-| Rechaza la oferta / Point / "No le interesa" | ❌ Bloqueo permanente | Nunca |
+| Estado "Interesado en carga / reserva", o razón "Interesado carga hoy" / "Se reserva" | Validar si cargó; si no, recontacto | 1 día |
+| Estado "Aliado Fleet/Delivery no acepta hub/Carga en otra operacion" | Pausa | 5 días |
+| Estado "Interesado esporádico no fijo" | Recontacto | 3 días |
+| Estado "Aliado Rechaza la oferta" / "Point", o razón "No le interesa" | ❌ Bloqueo permanente | Nunca |
 """)
         st.markdown("#### Reglas — Requerimientos Supply")
         st.markdown("""
@@ -815,10 +881,10 @@ if perfil == "Coordinador":
 | No contestó / Apagado / Fuera de servicio / Número errado | Recontacto | 1 día |
 | 10–14 intentos sin contacto (acumulado) | Pausa larga | 15 días |
 | 15+ intentos sin contacto (acumulado) | ❌ Bloqueo permanente | Nunca |
-| Aliado Contactado para primer cargue / Interesado Carga | Validar si usó el cupo; si no, recontacto | 1 día |
-| Pendiente gestión área encargada | Pausa | 5 días |
-| Aliado Rechaza la oferta | ❌ Bloqueo permanente | Nunca |
-| Requerimiento cerrado/finalizado / Aliado nunca lo usaron | Cierre | — |
+| Razón "Interesado pendiente de cargue" | Validar si cargó; si no, recontacto | 1 día |
+| Estado "Carga en otra operación" | Pausa | 5 días |
+| Estado "Interesado esporádico, no fijo" | Recontacto | 3 días |
+| Estado "Aliado rechaza la oferta", o razón "No le interesa" | ❌ Bloqueo permanente | Nunca |
 """)
 
 # =========================================================================
@@ -842,11 +908,19 @@ if perfil == "Analista":
 
         if busqueda.strip():
             df_plan = _get_roster("plan_roster", "PLANEACION_ALIADOS", COLS_PLANEACION)
-            coincidencias = df_plan[df_plan[campo_busq].astype(str).str.strip() == busqueda.strip()]
+            busqueda_norm = _normalizar_tel(busqueda)
+            coincidencias = df_plan[df_plan[campo_busq].apply(_normalizar_tel) == busqueda_norm] if busqueda_norm else df_plan.iloc[0:0]
             if coincidencias.empty:
-                st.warning("No se encontró ningún aliado con ese dato. Regístralo arriba si es nuevo.")
+                st.warning("No se encontró ningún aliado con ese dato. Coordinación debe cargarlo en la base de Planeación.")
+            elif len(coincidencias) > 1:
+                st.info(f"Hay {len(coincidencias)} aliados con ese dato. Elige cuál vas a gestionar.")
+                opciones = {f"{r.identificacion} — {r.nombre}": r.identificacion for _, r in coincidencias.iterrows()}
+                elegido = st.selectbox("Aliado", list(opciones.keys()), key="elegido_plan")
+                fila = coincidencias[coincidencias.identificacion.astype(str) == str(opciones[elegido])].iloc[0]
             else:
                 fila = coincidencias.iloc[0]
+
+            if not coincidencias.empty:
                 st.markdown(f"""
 - **Identificación:** {fila.identificacion}
 - **Vehículo:** {fila.vehiculo}
@@ -855,6 +929,7 @@ if perfil == "Analista":
 - **Nombre del mensajero:** {fila.nombre}
 - **Celular:** {fila.celular}
 - **Zona:** {fila.zona}
+- **Área del aliado:** {fila.area_aliado or "—"}
 - **Intentos de llamada:** {a_entero(fila.intentos_llamada)}
 - **Último resultado:** {fila.ultimo_resultado or "—"}
 - **Último estado:** {fila.categoria or "—"}
@@ -881,17 +956,21 @@ if perfil == "Analista":
                         resultado = st.selectbox("Resultado de la llamada", RESULTADOS, key="res_plan")
                         estado_final, razon = "", ""
                         if resultado == "Sí contestó":
-                            estado_final = st.selectbox("Categoría / Estado final", ESTADOS_FINALES_ALIADOS, key="estf_plan")
+                            estado_final = st.selectbox("Estado final", ESTADOS_FINALES_ALIADOS, key="estf_plan")
                             razon = st.selectbox("Razón", RAZONES, key="razon_plan")
+                        area_idx = AREA_ALIADO_OPCIONES.index(fila.area_aliado) if fila.area_aliado in AREA_ALIADO_OPCIONES else 0
+                        area_sel = st.selectbox("Área del aliado", AREA_ALIADO_OPCIONES, index=area_idx, key="area_plan")
                         nota = st.text_area("Observación", key="nota_plan")
                         enviar = st.form_submit_button("Guardar gestión")
                     if enviar:
                         if resultado == "Sí contestó" and not estado_final:
-                            st.error("Selecciona la categoría / estado final.")
+                            st.error("Selecciona el estado final.")
                         else:
                             razon_final = "" if razon == "—" else razon
                             fila_ctx = dict(fila); fila_ctx["analista"] = nombre
                             cambios, log = procesar_gestion_planeacion(fila_ctx, resultado, estado_final, razon_final, nota)
+                            if area_sel != "—":
+                                cambios["area_aliado"] = area_sel
                             actualizar_fila_por_id("PLANEACION_ALIADOS", "identificacion", fila.identificacion, cambios)
                             _actualizar_roster_local("plan_roster", "identificacion", fila.identificacion, cambios)
                             agregar_filas("PLANEACION_GESTIONES", [[_safe_str(log.get(c, "")) for c in COLS_PLANEACION_GESTIONES]])
@@ -904,7 +983,7 @@ if perfil == "Analista":
         if not df_plan.empty:
             vista = df_plan[~df_plan.bloqueado.apply(es_verdadero)]
             st.dataframe(
-                vista[["identificacion", "nombre", "celular", "zona", "analista", "estado_planeacion", "categoria", "intentos_llamada", "proxima_gestion"]],
+                vista[["identificacion", "nombre", "celular", "zona", "analista", "area_aliado", "estado_planeacion", "categoria", "intentos_llamada", "proxima_gestion"]],
                 hide_index=True, use_container_width=True,
             )
 
@@ -923,7 +1002,11 @@ if perfil == "Analista":
 
         if busqueda_r.strip():
             df_req = _get_roster("req_roster", "REQUERIMIENTOS_ALIADOS", COLS_REQUERIMIENTOS)
-            coincidencias = df_req[df_req[campo_busq_r].astype(str).str.strip() == busqueda_r.strip()]
+            if campo_busq_r == "telefono":
+                busq_norm = _normalizar_tel(busqueda_r)
+                coincidencias = df_req[df_req.telefono.apply(_normalizar_tel) == busq_norm] if busq_norm else df_req.iloc[0:0]
+            else:
+                coincidencias = df_req[df_req.numero_requerimiento.astype(str).str.strip() == busqueda_r.strip()]
             if coincidencias.empty:
                 st.warning("No se encontró ningún requerimiento con ese dato.")
             elif len(coincidencias) > 1:
@@ -942,8 +1025,10 @@ if perfil == "Analista":
 - **Teléfono:** {fila.telefono}
 - **Vehículo:** {fila.vehiculo}
 - **Cantidad de rutas:** {fila.cantidad_rutas}
+- **Área del aliado:** {fila.area_aliado or "—"}
 - **Estado de gestión:** {fila.estado_gestion or "Nuevo"}
 - **Último estado:** {fila.ultimo_estado or "—"}
+- **Última razón:** {fila.razon or "—"}
 - **Intentos de llamada:** {a_entero(fila.intentos_llamada)}
 - **Próxima gestión:** {fila.proxima_gestion or "—"}
 """)
@@ -968,16 +1053,22 @@ if perfil == "Analista":
                 else:
                     with st.form("form_gestion_requerimiento"):
                         resultado = st.selectbox("Resultado de la llamada", RESULTADOS, key="res_req")
-                        estado_final = ""
+                        estado_final, razon = "", ""
                         if resultado == "Sí contestó":
                             estado_final = st.selectbox("Estado final", ESTADOS_FINALES_REQ, key="estf_req")
+                            razon = st.selectbox("Razón", RAZONES_REQ, key="razon_req")
+                        area_idx = AREA_ALIADO_OPCIONES.index(fila.area_aliado) if fila.area_aliado in AREA_ALIADO_OPCIONES else 0
+                        area_sel = st.selectbox("Área del aliado", AREA_ALIADO_OPCIONES, index=area_idx, key="area_req")
                         nota = st.text_area("Observación", key="nota_req")
                         enviar = st.form_submit_button("Guardar gestión")
                     if enviar:
                         if resultado == "Sí contestó" and not estado_final:
                             st.error("Selecciona el estado final.")
                         else:
-                            cambios, log = procesar_gestion_requerimiento(fila, resultado, estado_final, nota)
+                            razon_final = "" if razon == "—" else razon
+                            cambios, log = procesar_gestion_requerimiento(fila, resultado, estado_final, razon_final, nota)
+                            if area_sel != "—":
+                                cambios["area_aliado"] = area_sel
                             actualizar_fila_por_id("REQUERIMIENTOS_ALIADOS", "telefono", fila.telefono, cambios)
                             _actualizar_roster_local("req_roster", "telefono", fila.telefono, cambios)
                             agregar_filas("REQUERIMIENTOS_GESTIONES", [[_safe_str(log.get(c, "")) for c in COLS_REQUERIMIENTOS_GESTIONES]])
@@ -990,7 +1081,7 @@ if perfil == "Analista":
         if not df_req.empty:
             vista = df_req[~df_req.bloqueado.apply(es_verdadero) & (df_req.estado_gestion != "Cerrado")]
             st.dataframe(
-                vista[["numero_requerimiento", "nombre", "telefono", "vehiculo", "cantidad_rutas", "estado_gestion", "ultimo_estado", "intentos_llamada", "proxima_gestion"]],
+                vista[["numero_requerimiento", "nombre", "telefono", "vehiculo", "cantidad_rutas", "area_aliado", "estado_gestion", "ultimo_estado", "razon", "intentos_llamada", "proxima_gestion"]],
                 hide_index=True, use_container_width=True,
             )
 
