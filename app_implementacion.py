@@ -60,7 +60,7 @@ RAZONES = [
     "No le interesa / cuestiones personales",
     "No tiene Vh / Vh dañado",
     "Peso / Volumen / recorrido",
-    "Tarifa",
+    "Tarifa/pago",
     "Tiene trabajo fijo",
     "Fuera de la ciudad",
     "Aliado no carga en HUB",
@@ -72,6 +72,9 @@ RAZONES = [
 SIN_CONTACTO = {"Apagado", "Fuera de servicio", "No contestó", "Número errado"}
 BLOQUEO_INMEDIATO_ALIADOS = {"Aliado Rechaza la oferta", "Point"}
 RAZONES_BLOQUEO_ALIADOS = {"No le interesa / cuestiones personales"}
+# Razones que, sin importar el estado final elegido, también agendan la validación
+# del día siguiente ("¿sí cargó?") en vez de un recontacto normal.
+RAZONES_VALIDACION_ALIADOS = {"Interesado carga hoy", "Se reserva"}
 
 # -------------------------------------------------------------------------
 # Catálogos: REQUERIMIENTOS SUPPLY
@@ -139,7 +142,7 @@ COLS_REQUERIMIENTOS = [
     "estado_gestion", "ultimo_estado", "intentos_llamada", "intentos_sin_contacto",
     "ultimo_resultado", "proxima_gestion", "bloqueado", "fecha_ingreso", "ultima_gestion", "observaciones",
 ]
-COLS_REQUERIMIENTOS_GESTIONES = ["fecha", "numero_requerimiento", "nombre", "resultado", "estado_final", "proxima_gestion", "observaciones"]
+COLS_REQUERIMIENTOS_GESTIONES = ["fecha", "telefono", "numero_requerimiento", "nombre", "resultado", "estado_final", "proxima_gestion", "observaciones"]
 
 COLS_COORDINADOR = [
     "documento", "nombre", "celular", "ciudad", "vehiculo", "rutas",
@@ -408,7 +411,7 @@ def procesar_gestion_planeacion(fila, resultado, estado_final, razon, nota):
         elif estado_final == "Interesado esporádico no fijo":
             cambios.update({"estado_planeacion": "En gestión", "bloqueado": False,
                              "proxima_gestion": hoy + timedelta(days=3), "categoria": estado_final, "razon": razon})
-        elif estado_final == "Interesado Carga/Reserva":
+        elif estado_final == "Interesado Carga/Reserva" or razon in RAZONES_VALIDACION_ALIADOS:
             cambios.update({"estado_planeacion": "Validación pendiente", "bloqueado": False,
                              "proxima_gestion": hoy + timedelta(days=1), "categoria": estado_final, "razon": razon})
         else:
@@ -468,8 +471,8 @@ def procesar_gestion_requerimiento(fila, resultado, estado_final, nota):
             cambios.update({"estado_gestion": "En gestión", "bloqueado": False, "proxima_gestion": hoy + timedelta(days=1), "ultimo_estado": estado_final})
 
     log = {
-        "fecha": now_col(), "numero_requerimiento": fila.get("numero_requerimiento"), "nombre": fila.get("nombre"),
-        "resultado": resultado, "estado_final": estado_final_log,
+        "fecha": now_col(), "telefono": fila.get("telefono"), "numero_requerimiento": fila.get("numero_requerimiento"),
+        "nombre": fila.get("nombre"), "resultado": resultado, "estado_final": estado_final_log,
         "proxima_gestion": cambios.get("proxima_gestion", ""), "observaciones": nota,
     }
     return cambios, log
@@ -484,8 +487,9 @@ def procesar_validacion_requerimiento(fila, uso_cupo, nota):
         cambios = {"estado_gestion": "En gestión", "proxima_gestion": hoy + timedelta(days=1),
                    "ultima_gestion": now_col(), "observaciones": nota or fila.get("observaciones", "")}
     log = {
-        "fecha": now_col(), "numero_requerimiento": fila.get("numero_requerimiento"), "nombre": fila.get("nombre"),
-        "resultado": "Sí contestó", "estado_final": cambios.get("ultimo_estado", "Recontacto - no usó el cupo"),
+        "fecha": now_col(), "telefono": fila.get("telefono"), "numero_requerimiento": fila.get("numero_requerimiento"),
+        "nombre": fila.get("nombre"), "resultado": "Sí contestó",
+        "estado_final": cambios.get("ultimo_estado", "Recontacto - no usó el cupo"),
         "proxima_gestion": cambios.get("proxima_gestion", ""), "observaciones": nota,
     }
     return cambios, log
@@ -508,6 +512,10 @@ def cargar_incremental_planeacion(archivo):
     if "identificacion" not in df.columns:
         st.error("El archivo no tiene columna de identificación (cédula/documento).")
         return 0, 0
+    # Todo el archivo se pasa a texto de una vez. Excel suele traer teléfonos/
+    # cédulas como número (int64); si no se convierten aquí, más abajo falla
+    # al intentar meter un int en una columna de texto ("Invalid value ... for dtype 'str'").
+    df = df.astype(str).replace("nan", "")
     existente = _get_roster("plan_roster", "PLANEACION_ALIADOS", COLS_PLANEACION, forzar=True)
     existentes_id = set(existente.identificacion.astype(str))
     nuevos_n, actualizados_n = 0, 0
@@ -515,7 +523,7 @@ def cargar_incremental_planeacion(archivo):
         ident = str(fn.get("identificacion", "")).strip()
         if not ident:
             continue
-        datos = {c: fn.get(c, "") for c in ["nombre", "celular", "zona", "vehiculo", "analista"] if c in df.columns and str(fn.get(c, "")).strip()}
+        datos = {c: str(fn.get(c, "")).strip() for c in ["nombre", "celular", "zona", "vehiculo", "analista"] if c in df.columns and str(fn.get(c, "")).strip()}
         if ident in existentes_id:
             idx = existente[existente.identificacion.astype(str) == ident].index[0]
             for campo, valor in datos.items():
@@ -538,35 +546,40 @@ def cargar_incremental_planeacion(archivo):
 
 
 def cargar_incremental_requerimientos(archivo):
-    """Igual que cargar_incremental_planeacion() pero para Requerimientos, clave = numero_requerimiento."""
+    """
+    Sube/actualiza la base de Requerimientos por 'telefono' — NO por número de
+    requerimiento, porque un mismo requerimiento trae varios aliados distintos
+    y el teléfono es lo único que identifica a cada persona.
+    """
     df = _leer_archivo_subido(archivo)
     df.columns = [str(c).strip().lower() for c in df.columns]
     df = df.rename(columns={k: v for k, v in ALIAS_REQUERIMIENTOS_BASE.items() if k in df.columns})
-    if "numero_requerimiento" not in df.columns:
-        st.error("El archivo no tiene columna 'Número de requerimiento'.")
+    if "telefono" not in df.columns:
+        st.error("El archivo no tiene columna de teléfono (TEL).")
         return 0, 0
+    df = df.astype(str).replace("nan", "")
     existente = _get_roster("req_roster", "REQUERIMIENTOS_ALIADOS", COLS_REQUERIMIENTOS, forzar=True)
-    existentes_id = set(existente.numero_requerimiento.astype(str))
+    existentes_id = set(existente.telefono.astype(str))
     nuevos_n, actualizados_n = 0, 0
     for _, fn in df.iterrows():
-        num = str(fn.get("numero_requerimiento", "")).strip()
-        if not num:
+        tel = str(fn.get("telefono", "")).strip()
+        if not tel:
             continue
-        datos = {c: fn.get(c, "") for c in ["nombre", "telefono", "vehiculo", "cantidad_rutas"] if c in df.columns and str(fn.get(c, "")).strip()}
-        if num in existentes_id:
-            idx = existente[existente.numero_requerimiento.astype(str) == num].index[0]
+        datos = {c: str(fn.get(c, "")).strip() for c in ["nombre", "numero_requerimiento", "vehiculo", "cantidad_rutas"] if c in df.columns and str(fn.get(c, "")).strip()}
+        if tel in existentes_id:
+            idx = existente[existente.telefono.astype(str) == tel].index[0]
             for campo, valor in datos.items():
                 existente.loc[idx, campo] = valor
             actualizados_n += 1
         else:
             nueva_fila = {c: "" for c in COLS_REQUERIMIENTOS}
             nueva_fila.update({
-                "numero_requerimiento": num, **datos, "estado_gestion": "Nuevo",
+                "telefono": tel, **datos, "estado_gestion": "Nuevo",
                 "intentos_llamada": 0, "intentos_sin_contacto": 0,
                 "proxima_gestion": now_col().date(), "bloqueado": False, "fecha_ingreso": now_col().date(),
             })
             existente = pd.concat([existente, pd.DataFrame([nueva_fila])], ignore_index=True)
-            existentes_id.add(num)
+            existentes_id.add(tel)
             nuevos_n += 1
     reemplazar_hoja("REQUERIMIENTOS_ALIADOS", existente)
     st.session_state["req_roster"] = existente
@@ -687,6 +700,7 @@ if perfil == "Coordinador":
                 nuevos = pd.read_csv(archivo) if archivo.name.lower().endswith("csv") else pd.read_excel(archivo)
                 nuevos.columns = [str(c).strip().lower() for c in nuevos.columns]
                 nuevos = nuevos.rename(columns={k: v for k, v in ALIAS_COORDINADOR.items() if k in nuevos.columns})
+                nuevos = nuevos.astype(str).replace("nan", "")
                 faltantes = {"nombre", "documento"} - set(nuevos.columns)
                 if faltantes:
                     st.error(f"Faltan columnas mínimas: {', '.join(faltantes)}.")
@@ -702,10 +716,10 @@ if perfil == "Coordinador":
                         if rutas_n >= META and estado_impl not in {"Rechazado por Clicoh", "Deserta"}:
                             estado_impl = "Supera Implementacion"
                         datos = {
-                            "nombre": fn.get("nombre", ""), "celular": fn.get("celular", ""),
-                            "ciudad": fn.get("ciudad", ""), "vehiculo": fn.get("vehiculo", ""),
-                            "rutas": rutas_n, "estado_clicoh": fn.get("estado_clicoh", ""),
-                            "estado_implementacion": estado_impl, "fecha_ultimo_cargue": fn.get("fecha_ultimo_cargue", ""),
+                            "nombre": str(fn.get("nombre", "")), "celular": str(fn.get("celular", "")),
+                            "ciudad": str(fn.get("ciudad", "")), "vehiculo": str(fn.get("vehiculo", "")),
+                            "rutas": rutas_n, "estado_clicoh": str(fn.get("estado_clicoh", "")),
+                            "estado_implementacion": estado_impl, "fecha_ultimo_cargue": str(fn.get("fecha_ultimo_cargue", "")),
                         }
                         if doc in existentes_doc:
                             idx = existente[existente.documento.astype(str) == doc].index[0]
@@ -912,8 +926,16 @@ if perfil == "Analista":
             coincidencias = df_req[df_req[campo_busq_r].astype(str).str.strip() == busqueda_r.strip()]
             if coincidencias.empty:
                 st.warning("No se encontró ningún requerimiento con ese dato.")
+            elif len(coincidencias) > 1:
+                # Un mismo número de requerimiento puede traer varios aliados: hay que elegir cuál.
+                st.info(f"Ese requerimiento tiene {len(coincidencias)} aliados asociados. Elige a cuál vas a gestionar.")
+                opciones = {f"{r.telefono} — {r.nombre}": r.telefono for _, r in coincidencias.iterrows()}
+                elegido = st.selectbox("Aliado", list(opciones.keys()), key="elegido_req")
+                fila = coincidencias[coincidencias.telefono.astype(str) == str(opciones[elegido])].iloc[0]
             else:
                 fila = coincidencias.iloc[0]
+
+            if not coincidencias.empty:
                 st.markdown(f"""
 - **Número de requerimiento:** {fila.numero_requerimiento}
 - **Nombre:** {fila.nombre}
@@ -937,8 +959,8 @@ if perfil == "Analista":
                         enviar = st.form_submit_button("Guardar validación")
                     if enviar:
                         cambios, log = procesar_validacion_requerimiento(fila, uso == "Sí", nota)
-                        actualizar_fila_por_id("REQUERIMIENTOS_ALIADOS", "numero_requerimiento", fila.numero_requerimiento, cambios)
-                        _actualizar_roster_local("req_roster", "numero_requerimiento", fila.numero_requerimiento, cambios)
+                        actualizar_fila_por_id("REQUERIMIENTOS_ALIADOS", "telefono", fila.telefono, cambios)
+                        _actualizar_roster_local("req_roster", "telefono", fila.telefono, cambios)
                         agregar_filas("REQUERIMIENTOS_GESTIONES", [[_safe_str(log.get(c, "")) for c in COLS_REQUERIMIENTOS_GESTIONES]])
                         _agregar_local("req_hist", log, COLS_REQUERIMIENTOS_GESTIONES)
                         st.success("Guardado.")
@@ -956,8 +978,8 @@ if perfil == "Analista":
                             st.error("Selecciona el estado final.")
                         else:
                             cambios, log = procesar_gestion_requerimiento(fila, resultado, estado_final, nota)
-                            actualizar_fila_por_id("REQUERIMIENTOS_ALIADOS", "numero_requerimiento", fila.numero_requerimiento, cambios)
-                            _actualizar_roster_local("req_roster", "numero_requerimiento", fila.numero_requerimiento, cambios)
+                            actualizar_fila_por_id("REQUERIMIENTOS_ALIADOS", "telefono", fila.telefono, cambios)
+                            _actualizar_roster_local("req_roster", "telefono", fila.telefono, cambios)
                             agregar_filas("REQUERIMIENTOS_GESTIONES", [[_safe_str(log.get(c, "")) for c in COLS_REQUERIMIENTOS_GESTIONES]])
                             _agregar_local("req_hist", log, COLS_REQUERIMIENTOS_GESTIONES)
                             st.success("Guardado.")
