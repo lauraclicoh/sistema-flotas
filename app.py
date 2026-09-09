@@ -22,13 +22,13 @@ RESULTADOS       = ["Apagado","Fuera de servicio","No contestó","Número errado
 ESTADOS_FINALES  = [
     "Aliado Rechaza la oferta",
     "Aliado Fleet/Delivery no acepta hub",
-    "Interesado llega a cargue",
+    "Interesado llega a cargue/ Programado",
     "Interesado esporádico",
     "Empleado",
     "Point",
 ]
 RAZONES = [
-    "Interesado carga hoy",
+    "Interesado carga hoy/ reserva",
     "No le interesa / cuestiones personales",
     "No tiene Vh / Vh dañado",
     "Peso / Volumen / recorrido",
