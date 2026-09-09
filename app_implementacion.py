@@ -1,4 +1,3 @@
-cat > /home/claude/planeacion_aliados.py << 'PYEOF'
 import time
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -937,5 +936,3 @@ if perfil == "Analista":
             st.info("Sin gestiones de Requerimientos en ese rango.")
         else:
             st.dataframe(mr.sort_values("fecha", ascending=False), hide_index=True, use_container_width=True)
-PYEOF
-python3 -m py_compile /home/claude/planeacion_aliados.py && echo OK
