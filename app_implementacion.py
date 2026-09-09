@@ -216,6 +216,16 @@ def _df_to_rows(df: pd.DataFrame) -> list:
     return [[_safe_str(v) for v in row] for row in df.values]
 
 
+def _str_dict(d):
+    """
+    Convierte todos los valores de un dict a texto con _safe_str antes de
+    meterlos en un DataFrame. Necesario porque el pandas de este entorno usa
+    dtype 'str' estricto: un int, bool o date crudo revienta la carga entera
+    ("Invalid value ... for dtype 'str'") apenas se intenta crear la fila.
+    """
+    return {k: _safe_str(v) for k, v in d.items()}
+
+
 def leer_hoja(nombre_hoja, esperado_cols=None):
     """Lee toda la hoja con get_all_values (más tolerante a encabezados vacíos/duplicados que get_all_records)."""
     try:
@@ -600,7 +610,7 @@ def cargar_incremental_planeacion(archivo):
                 "intentos_llamada": 0, "intentos_sin_contacto": 0,
                 "proxima_gestion": now_col().date(), "bloqueado": False, "fecha_ingreso": now_col().date(),
             })
-            existente = pd.concat([existente, pd.DataFrame([nueva_fila])], ignore_index=True)
+            existente = pd.concat([existente, pd.DataFrame([_str_dict(nueva_fila)])], ignore_index=True)
             existente_norm = pd.concat([existente_norm, pd.Series([ident_norm], index=[existente.index[-1]])])
             nuevos_n += 1
     reemplazar_hoja("PLANEACION_ALIADOS", existente)
@@ -644,7 +654,7 @@ def cargar_incremental_requerimientos(archivo):
                 "intentos_llamada": 0, "intentos_sin_contacto": 0,
                 "proxima_gestion": now_col().date(), "bloqueado": False, "fecha_ingreso": now_col().date(),
             })
-            existente = pd.concat([existente, pd.DataFrame([nueva_fila])], ignore_index=True)
+            existente = pd.concat([existente, pd.DataFrame([_str_dict(nueva_fila)])], ignore_index=True)
             existente_norm = pd.concat([existente_norm, pd.Series([tel_norm], index=[existente.index[-1]])])
             nuevos_n += 1
     reemplazar_hoja("REQUERIMIENTOS_ALIADOS", existente)
@@ -772,30 +782,32 @@ if perfil == "Coordinador":
                     st.error(f"Faltan columnas mínimas: {', '.join(faltantes)}.")
                 else:
                     existente = _get_roster("coord_roster", "COORDINADOR_ALIADOS", COLS_COORDINADOR, forzar=True)
-                    existentes_doc = set(existente.documento.astype(str))
+                    existente_norm = existente.documento.apply(_normalizar_tel)
                     for _, fn in nuevos.iterrows():
                         doc = str(fn.get("documento", "")).strip()
-                        if not doc:
+                        doc_norm = _normalizar_tel(doc)
+                        if not doc_norm:
                             continue
                         rutas_n = a_entero(fn.get("rutas", 0))
                         estado_impl = str(fn.get("estado_implementacion", "") or "").strip()
                         if rutas_n >= META and estado_impl not in {"Rechazado por Clicoh", "Deserta"}:
                             estado_impl = "Supera Implementacion"
-                        datos = {
-                            "nombre": str(fn.get("nombre", "")), "celular": str(fn.get("celular", "")),
-                            "ciudad": str(fn.get("ciudad", "")), "vehiculo": str(fn.get("vehiculo", "")),
-                            "rutas": rutas_n, "estado_clicoh": str(fn.get("estado_clicoh", "")),
-                            "estado_implementacion": estado_impl, "fecha_ultimo_cargue": str(fn.get("fecha_ultimo_cargue", "")),
-                        }
-                        if doc in existentes_doc:
-                            idx = existente[existente.documento.astype(str) == doc].index[0]
+                        datos = _str_dict({
+                            "nombre": fn.get("nombre", ""), "celular": fn.get("celular", ""),
+                            "ciudad": fn.get("ciudad", ""), "vehiculo": fn.get("vehiculo", ""),
+                            "rutas": rutas_n, "estado_clicoh": fn.get("estado_clicoh", ""),
+                            "estado_implementacion": estado_impl, "fecha_ultimo_cargue": fn.get("fecha_ultimo_cargue", ""),
+                        })
+                        coincide = existente_norm[existente_norm == doc_norm]
+                        if not coincide.empty:
+                            idx = coincide.index[0]
                             for campo, valor in datos.items():
                                 existente.loc[idx, campo] = valor
                         else:
                             nueva_fila = {c: "" for c in COLS_COORDINADOR}
                             nueva_fila.update({"documento": doc, **datos})
-                            existente = pd.concat([existente, pd.DataFrame([nueva_fila])], ignore_index=True)
-                            existentes_doc.add(doc)
+                            existente = pd.concat([existente, pd.DataFrame([_str_dict(nueva_fila)])], ignore_index=True)
+                            existente_norm = pd.concat([existente_norm, pd.Series([doc_norm], index=[existente.index[-1]])])
                     reemplazar_hoja("COORDINADOR_ALIADOS", existente)
                     st.session_state["coord_roster"] = existente
                     st.session_state["coord_roster_stale"] = False
