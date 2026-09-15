@@ -941,7 +941,6 @@ if perfil == "Analista":
 - **Nombre del mensajero:** {fila.nombre}
 - **Celular:** {fila.celular}
 - **Zona:** {fila.zona}
-- **Área del aliado:** {fila.area_aliado or "—"}
 - **Intentos de llamada:** {a_entero(fila.intentos_llamada)}
 - **Último resultado:** {fila.ultimo_resultado or "—"}
 - **Último estado:** {fila.categoria or "—"}
@@ -964,25 +963,25 @@ if perfil == "Analista":
                         st.success("Guardado.")
                         st.rerun()
                 else:
+                    st.markdown("#### 📞 Registrar gestión para este aliado")
                     with st.form("form_gestion_planeacion"):
-                        resultado = st.selectbox("Resultado de la llamada", RESULTADOS, key="res_plan")
-                        estado_final, razon = "", ""
-                        if resultado == "Sí contestó":
-                            estado_final = st.selectbox("Estado final", ESTADOS_FINALES_ALIADOS, key="estf_plan")
-                            razon = st.selectbox("Razón", RAZONES, key="razon_plan")
-                        area_idx = AREA_ALIADO_OPCIONES.index(fila.area_aliado) if fila.area_aliado in AREA_ALIADO_OPCIONES else 0
-                        area_sel = st.selectbox("Área del aliado", AREA_ALIADO_OPCIONES, index=area_idx, key="area_plan")
-                        nota = st.text_area("Observación", key="nota_plan")
+                        c1, c2 = st.columns(2)
+                        with c1:
+                            resultado = st.selectbox("Resultado de la llamada", RESULTADOS, key="res_plan")
+                        with c2:
+                            estado_final = st.selectbox("Estado final (si contestó)", ["—"] + ESTADOS_FINALES_ALIADOS, key="estf_plan")
+                        razon = st.selectbox("Razón (si contestó)", RAZONES, key="razon_plan")
+                        nota = st.text_area("Observaciones", key="nota_plan")
                         enviar = st.form_submit_button("Guardar gestión")
                     if enviar:
-                        if resultado == "Sí contestó" and not estado_final:
+                        if resultado == "Sí contestó" and estado_final == "—":
                             st.error("Selecciona el estado final.")
                         else:
-                            razon_final = "" if razon == "—" else razon
+                            # Estado final y razón solo cuentan si de verdad contestó; si no, se ignoran aunque queden seleccionados.
+                            estado_final_final = estado_final if (resultado == "Sí contestó" and estado_final != "—") else ""
+                            razon_final = razon if (resultado == "Sí contestó" and razon != "—") else ""
                             fila_ctx = dict(fila); fila_ctx["analista"] = nombre
-                            cambios, log = procesar_gestion_planeacion(fila_ctx, resultado, estado_final, razon_final, nota)
-                            if area_sel != "—":
-                                cambios["area_aliado"] = area_sel
+                            cambios, log = procesar_gestion_planeacion(fila_ctx, resultado, estado_final_final, razon_final, nota)
                             actualizar_fila_por_id("PLANEACION_ALIADOS", "identificacion", fila.identificacion, cambios)
                             _actualizar_roster_local("plan_roster", "identificacion", fila.identificacion, cambios)
                             agregar_filas("PLANEACION_GESTIONES", [[_safe_str(log.get(c, "")) for c in COLS_PLANEACION_GESTIONES]])
@@ -995,7 +994,7 @@ if perfil == "Analista":
         if not df_plan.empty:
             vista = df_plan[~df_plan.bloqueado.apply(es_verdadero)]
             st.dataframe(
-                vista[["identificacion", "nombre", "celular", "zona", "analista", "area_aliado", "estado_planeacion", "categoria", "intentos_llamada", "proxima_gestion"]],
+                vista[["identificacion", "nombre", "celular", "zona", "analista", "estado_planeacion", "categoria", "intentos_llamada", "proxima_gestion"]],
                 hide_index=True, use_container_width=True,
             )
 
