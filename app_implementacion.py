@@ -696,17 +696,16 @@ if perfil == "Coordinador":
 
     with tab_tablero:
         if st.button("🔄 Actualizar todo desde Google Sheets"):
-            for k in ["plan_roster", "req_roster", "coord_roster"]:
+            for k in ["plan_roster", "req_roster"]:
                 _invalidar_roster(k)
             st.rerun()
 
         df_plan = _get_roster("plan_roster", "PLANEACION_ALIADOS", COLS_PLANEACION)
         df_req = _get_roster("req_roster", "REQUERIMIENTOS_ALIADOS", COLS_REQUERIMIENTOS)
-        df_coord = _get_roster("coord_roster", "COORDINADOR_ALIADOS", COLS_COORDINADOR)
 
         st.subheader("Gestión de Aliados (Planeación)")
         if df_plan.empty:
-            st.info("Aún no hay aliados registrados en Planeación.")
+            st.info("Aún no hay aliados cargados en Planeación.")
         else:
             pend = df_plan[pd.to_datetime(df_plan.proxima_gestion, errors="coerce") <= pd.Timestamp(now_col().date())]
             c1, c2, c3, c4 = st.columns(4)
@@ -721,27 +720,17 @@ if perfil == "Coordinador":
 
         st.subheader("Requerimientos Supply")
         if df_req.empty:
-            st.info("Aún no hay requerimientos registrados.")
+            st.info("Aún no hay requerimientos cargados.")
         else:
             c1, c2, c3, c4 = st.columns(4)
             c1.metric("Total requerimientos", len(df_req))
-            c2.metric("Cerrados", int((df_req.estado_gestion == "Cerrado").sum()))
-            c3.metric("Pendientes área encargada", int((df_req.estado_gestion == "Pendiente área encargada").sum()))
+            c2.metric("En validación pendiente", int((df_req.estado_gestion == "Validación pendiente").sum()))
+            c3.metric("Pausados", int((df_req.estado_gestion == "Pausado").sum()))
             c4.metric("Bloqueados permanentes", int(df_req.bloqueado.apply(es_verdadero).sum()))
-
-        st.subheader("Coordinador")
-        if df_coord.empty:
-            st.info("Aún no se ha cargado ninguna base de Implementación.")
-        else:
-            rutas_num = df_coord.rutas.apply(a_entero)
-            c1, c2, c3 = st.columns(3)
-            c1.metric("Aliados en seguimiento", len(df_coord))
-            c2.metric("Superaron la meta (20 rutas)", int((rutas_num >= META).sum()))
-            c3.metric("Activos clicOH", int((df_coord.estado_clicoh == "Activo").sum()))
-            dist2 = df_coord.estado_implementacion[df_coord.estado_implementacion != ""].value_counts().reset_index()
+            dist2 = df_req[df_req.area_aliado != ""].area_aliado.value_counts().reset_index()
             if not dist2.empty:
-                dist2.columns = ["Estado Implementación", "N"]
-                st.plotly_chart(px.pie(dist2, values="N", names="Estado Implementación", title="Distribución Estado Implementación"), use_container_width=True)
+                dist2.columns = ["Área del aliado", "N"]
+                st.plotly_chart(px.pie(dist2, values="N", names="Área del aliado", title="Requerimientos por área responsable"), use_container_width=True)
 
     with tab_carga:
         st.caption("Todas las cargas son incrementales: si el aliado/requerimiento ya existe se actualizan sus datos de contacto, sin tocar el historial de gestión. Si es nuevo, se agrega.")
@@ -768,110 +757,122 @@ if perfil == "Coordinador":
                 except Exception as e:
                     st.error(f"No se pudo procesar el archivo: {e}")
 
-        st.markdown("#### 🧑‍🏭 Base de Implementación (seguimiento a 20 rutas)")
-        st.caption("Columnas esperadas: Nombre, Documento, Celular, Ciudad, Vehículo, # Rutas, Estado clicOH, Estado Implementación, fecha último cargue.")
-        archivo = st.file_uploader("Excel o CSV", type=["xlsx", "xls", "csv"], key="up_impl")
-        if archivo is not None:
-            try:
-                nuevos = pd.read_csv(archivo) if archivo.name.lower().endswith("csv") else pd.read_excel(archivo)
-                nuevos.columns = [str(c).strip().lower() for c in nuevos.columns]
-                nuevos = nuevos.rename(columns={k: v for k, v in ALIAS_COORDINADOR.items() if k in nuevos.columns})
-                nuevos = nuevos.astype(str).replace("nan", "")
-                faltantes = {"nombre", "documento"} - set(nuevos.columns)
-                if faltantes:
-                    st.error(f"Faltan columnas mínimas: {', '.join(faltantes)}.")
-                else:
-                    existente = _get_roster("coord_roster", "COORDINADOR_ALIADOS", COLS_COORDINADOR, forzar=True)
-                    existente_norm = existente.documento.apply(_normalizar_tel)
-                    for _, fn in nuevos.iterrows():
-                        doc = str(fn.get("documento", "")).strip()
-                        doc_norm = _normalizar_tel(doc)
-                        if not doc_norm:
-                            continue
-                        rutas_n = a_entero(fn.get("rutas", 0))
-                        estado_impl = str(fn.get("estado_implementacion", "") or "").strip()
-                        if rutas_n >= META and estado_impl not in {"Rechazado por Clicoh", "Deserta"}:
-                            estado_impl = "Supera Implementacion"
-                        datos = _str_dict({
-                            "nombre": fn.get("nombre", ""), "celular": fn.get("celular", ""),
-                            "ciudad": fn.get("ciudad", ""), "vehiculo": fn.get("vehiculo", ""),
-                            "rutas": rutas_n, "estado_clicoh": fn.get("estado_clicoh", ""),
-                            "estado_implementacion": estado_impl, "fecha_ultimo_cargue": fn.get("fecha_ultimo_cargue", ""),
-                        })
-                        coincide = existente_norm[existente_norm == doc_norm]
-                        if not coincide.empty:
-                            idx = coincide.index[0]
-                            for campo, valor in datos.items():
-                                existente.loc[idx, campo] = valor
-                        else:
-                            nueva_fila = {c: "" for c in COLS_COORDINADOR}
-                            nueva_fila.update({"documento": doc, **datos})
-                            existente = pd.concat([existente, pd.DataFrame([_str_dict(nueva_fila)])], ignore_index=True)
-                            existente_norm = pd.concat([existente_norm, pd.Series([doc_norm], index=[existente.index[-1]])])
-                    reemplazar_hoja("COORDINADOR_ALIADOS", existente)
-                    st.session_state["coord_roster"] = existente
-                    st.session_state["coord_roster_stale"] = False
-                    st.success(f"Base cargada: {len(nuevos)} registros procesados.")
-                    st.rerun()
-            except Exception as e:
-                st.error(f"No se pudo leer el archivo: {e}")
-
     with tab_hoy:
-        st.subheader("Gestión de hoy — Coordinador")
-        df_coord = _get_roster("coord_roster", "COORDINADOR_ALIADOS", COLS_COORDINADOR)
-        if df_coord.empty:
-            st.info("Todavía no se ha cargado ninguna base.")
+        st.subheader("Gestión de hoy — supervisión")
+        st.caption("Vista de solo lectura: muestra lo que los analistas han gestionado hoy.")
+        if st.button("🔄 Actualizar", key="btn_ref_hoy"):
+            hist_plan = _get_historial("plan_hist", "PLANEACION_GESTIONES", COLS_PLANEACION_GESTIONES, forzar=True)
+            hist_req = _get_historial("req_hist", "REQUERIMIENTOS_GESTIONES", COLS_REQUERIMIENTOS_GESTIONES, forzar=True)
         else:
-            hoy_str = str(now_col().date())
-            hoy_df = df_coord[df_coord.ultima_gestion.astype(str).str.startswith(hoy_str)]
+            hist_plan = _get_historial("plan_hist", "PLANEACION_GESTIONES", COLS_PLANEACION_GESTIONES)
+            hist_req = _get_historial("req_hist", "REQUERIMIENTOS_GESTIONES", COLS_REQUERIMIENTOS_GESTIONES)
+
+        hoy = now_col().date()
+        hp = hist_plan[hist_plan.fecha.dt.date == hoy] if not hist_plan.empty else hist_plan
+        hr = hist_req[hist_req.fecha.dt.date == hoy] if not hist_req.empty else hist_req
+
+        total_llamadas = len(hp) + len(hr)
+        contactados = int((hp.resultado == "Sí contestó").sum() if not hp.empty else 0) + int((hr.resultado == "Sí contestó").sum() if not hr.empty else 0)
+        no_resp = total_llamadas - contactados
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("📞 Llamadas hoy", total_llamadas)
+        c2.metric("✅ Contactados", contactados)
+        c3.metric("📵 No responden", no_resp)
+        c4.metric("📊 Contactabilidad", f"{round(contactados / total_llamadas * 100, 1) if total_llamadas else 0}%")
+
+        st.markdown("#### 🧑‍💼 Gestión de Aliados (Planeación)")
+        if hp is None or hp.empty:
+            st.info("Sin gestiones de Planeación hoy.")
+        else:
+            prod = hp.groupby("analista").size().reset_index(name="llamadas")
+            st.plotly_chart(px.bar(prod, x="analista", y="llamadas", title="Llamadas por analista — hoy"), use_container_width=True)
+            hp_show = hp.copy()
+            hp_show["Hora"] = hp_show.fecha.dt.strftime("%I:%M %p")
             st.dataframe(
-                hoy_df[["documento", "nombre", "ciudad", "vehiculo", "rutas", "estado_implementacion", "proxima_gestion"]],
+                hp_show[["Hora", "analista", "identificacion", "resultado", "estado_final", "razon", "proxima_gestion", "observaciones"]].sort_values("Hora", ascending=False),
                 hide_index=True, use_container_width=True,
             )
-            st.markdown("#### ✏️ Actualizar un aliado")
-            doc_sel = st.selectbox("Documento", df_coord.documento.astype(str).tolist(), key="doc_sel_coord")
-            fila = df_coord[df_coord.documento.astype(str) == doc_sel].iloc[0]
-            with st.form("form_actualizar_coordinador"):
-                c1, c2 = st.columns(2)
-                rutas_nueva = c1.number_input("Rutas actuales", min_value=0, value=a_entero(fila.rutas))
-                estado_nuevo = c2.selectbox(
-                    "Estado Implementación", ESTADO_IMPLEMENTACION,
-                    index=ESTADO_IMPLEMENTACION.index(fila.estado_implementacion) if fila.estado_implementacion in ESTADO_IMPLEMENTACION else 0,
-                )
-                nota = st.text_area("Observación")
-                enviar = st.form_submit_button("Guardar gestión")
-            if enviar:
-                if rutas_nueva >= META and estado_nuevo not in {"Rechazado por Clicoh", "Deserta"}:
-                    estado_nuevo = "Supera Implementacion"
-                cambios = {"rutas": rutas_nueva, "estado_implementacion": estado_nuevo,
-                           "ultima_gestion": now_col(), "observaciones": nota or fila.observaciones}
-                actualizar_fila_por_id("COORDINADOR_ALIADOS", "documento", doc_sel, cambios)
-                _actualizar_roster_local("coord_roster", "documento", doc_sel, cambios)
-                agregar_filas("COORDINADOR_GESTIONES", [[
-                    _safe_str(now_col()), doc_sel, fila.nombre, estado_nuevo, str(rutas_nueva), nota,
-                ]])
-                _agregar_local("coord_hist", {
-                    "fecha": now_col(), "documento": doc_sel, "nombre": fila.nombre,
-                    "estado_implementacion": estado_nuevo, "rutas": rutas_nueva, "observaciones": nota,
-                }, COLS_COORDINADOR_GESTIONES)
-                st.success("Gestión guardada.")
-                st.rerun()
+
+        st.markdown("#### 📨 Requerimientos")
+        if hr is None or hr.empty:
+            st.info("Sin gestiones de Requerimientos hoy.")
+        else:
+            hr_show = hr.copy()
+            hr_show["Hora"] = hr_show.fecha.dt.strftime("%I:%M %p")
+            st.dataframe(
+                hr_show[["Hora", "numero_requerimiento", "telefono", "nombre", "resultado", "estado_final", "razon", "proxima_gestion", "observaciones"]].sort_values("Hora", ascending=False),
+                hide_index=True, use_container_width=True,
+            )
 
     with tab_hist:
-        st.subheader("Histórico Coordinador")
+        st.subheader("Histórico de gestiones")
+        st.caption("Trazabilidad completa de lo registrado por los analistas.")
         if st.button("🔄 Actualizar histórico", key="btn_ref_coord_hist"):
-            hist_coord = _get_historial("coord_hist", "COORDINADOR_GESTIONES", COLS_COORDINADOR_GESTIONES, forzar=True)
+            hist_plan = _get_historial("plan_hist", "PLANEACION_GESTIONES", COLS_PLANEACION_GESTIONES, forzar=True)
+            hist_req = _get_historial("req_hist", "REQUERIMIENTOS_GESTIONES", COLS_REQUERIMIENTOS_GESTIONES, forzar=True)
         else:
-            hist_coord = _get_historial("coord_hist", "COORDINADOR_GESTIONES", COLS_COORDINADOR_GESTIONES)
-        if hist_coord.empty:
-            st.info("Sin gestiones registradas aún.")
+            hist_plan = _get_historial("plan_hist", "PLANEACION_GESTIONES", COLS_PLANEACION_GESTIONES)
+            hist_req = _get_historial("req_hist", "REQUERIMIENTOS_GESTIONES", COLS_REQUERIMIENTOS_GESTIONES)
+
+        c1, c2 = st.columns(2)
+        f1 = c1.date_input("Desde", now_col().date() - timedelta(days=7), max_value=now_col().date(), key="ch_f1")
+        f2 = c2.date_input("Hasta", now_col().date(), max_value=now_col().date(), key="ch_f2")
+
+        dp = hist_plan[(hist_plan.fecha.dt.date >= f1) & (hist_plan.fecha.dt.date <= f2)] if not hist_plan.empty else hist_plan
+        dr = hist_req[(hist_req.fecha.dt.date >= f1) & (hist_req.fecha.dt.date <= f2)] if not hist_req.empty else hist_req
+
+        st.markdown("#### 🧑‍💼 Gestión de Aliados (Planeación)")
+        if dp is None or dp.empty:
+            st.info("Sin gestiones de Planeación en ese rango.")
         else:
-            c1, c2 = st.columns(2)
-            f1 = c1.date_input("Desde", now_col().date() - timedelta(days=7), max_value=now_col().date(), key="ch_f1")
-            f2 = c2.date_input("Hasta", now_col().date(), max_value=now_col().date(), key="ch_f2")
-            d = hist_coord[(hist_coord.fecha.dt.date >= f1) & (hist_coord.fecha.dt.date <= f2)]
-            st.dataframe(d.sort_values("fecha", ascending=False), hide_index=True, use_container_width=True)
-            st.download_button("📥 Descargar (CSV)", d.to_csv(index=False).encode("utf-8"), f"coordinador_{f1}_{f2}.csv", "text/csv")
+            total = len(dp)
+            cont = int((dp.resultado == "Sí contestó").sum())
+            inter = int(dp.estado_final.isin(["Interesado Carga/Reserva"]).sum())
+            rech = int((dp.estado_final == "Aliado Rechaza la oferta").sum())
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("📞 Llamadas", total)
+            c2.metric("✅ Contactados", cont)
+            c3.metric("🚗 Interesados", inter)
+            c4.metric("❌ Rechazos", rech)
+
+            kpi = dp.groupby("analista").agg(llamadas=("resultado", "size")).reset_index()
+            cont_a = dp[dp.resultado == "Sí contestó"].groupby("analista").size().reset_index(name="contactados")
+            kpi = kpi.merge(cont_a, on="analista", how="left").fillna(0)
+            kpi["contactados"] = kpi.contactados.astype(int)
+            kpi["% contacto"] = (kpi.contactados / kpi.llamadas * 100).round(1)
+            st.markdown("##### KPIs por analista")
+            st.dataframe(kpi, hide_index=True, use_container_width=True)
+
+            razones = dp[dp.razon != ""].razon.value_counts().reset_index()
+            if not razones.empty:
+                razones.columns = ["Razón", "N"]
+                st.plotly_chart(px.bar(razones, x="Razón", y="N", title="Principales razones"), use_container_width=True)
+
+            dp_show = dp.copy()
+            dp_show["Fecha"] = dp_show.fecha.dt.strftime("%d/%m/%Y %I:%M %p")
+            st.dataframe(
+                dp_show[["Fecha", "analista", "identificacion", "resultado", "estado_final", "razon", "proxima_gestion", "observaciones"]].sort_values("Fecha", ascending=False),
+                hide_index=True, use_container_width=True,
+            )
+            st.download_button("📥 Descargar Planeación (CSV)", dp.to_csv(index=False).encode("utf-8"), f"planeacion_{f1}_{f2}.csv", "text/csv")
+
+        st.markdown("#### 📨 Requerimientos")
+        if dr is None or dr.empty:
+            st.info("Sin gestiones de Requerimientos en ese rango.")
+        else:
+            total_r = len(dr)
+            cont_r = int((dr.resultado == "Sí contestó").sum())
+            c1, c2, c3 = st.columns(3)
+            c1.metric("📞 Llamadas", total_r)
+            c2.metric("✅ Contactados", cont_r)
+            c3.metric("📊 Contactabilidad", f"{round(cont_r / total_r * 100, 1) if total_r else 0}%")
+            dr_show = dr.copy()
+            dr_show["Fecha"] = dr_show.fecha.dt.strftime("%d/%m/%Y %I:%M %p")
+            st.dataframe(
+                dr_show[["Fecha", "numero_requerimiento", "telefono", "nombre", "resultado", "estado_final", "razon", "proxima_gestion", "observaciones"]].sort_values("Fecha", ascending=False),
+                hide_index=True, use_container_width=True,
+            )
+            st.download_button("📥 Descargar Requerimientos (CSV)", dr.to_csv(index=False).encode("utf-8"), f"requerimientos_{f1}_{f2}.csv", "text/csv")
 
     with tab_reglas:
         st.markdown("#### Reglas — Gestión de Aliados (Planeación)")
@@ -1062,22 +1063,25 @@ if perfil == "Analista":
                         st.success("Guardado.")
                         st.rerun()
                 else:
+                    st.markdown("#### 📞 Registrar gestión para este aliado")
                     with st.form("form_gestion_requerimiento"):
-                        resultado = st.selectbox("Resultado de la llamada", RESULTADOS, key="res_req")
-                        estado_final, razon = "", ""
-                        if resultado == "Sí contestó":
-                            estado_final = st.selectbox("Estado final", ESTADOS_FINALES_REQ, key="estf_req")
-                            razon = st.selectbox("Razón", RAZONES_REQ, key="razon_req")
+                        c1, c2 = st.columns(2)
+                        with c1:
+                            resultado = st.selectbox("Resultado de la llamada", RESULTADOS, key="res_req")
+                        with c2:
+                            estado_final = st.selectbox("Estado final (si contestó)", ["—"] + ESTADOS_FINALES_REQ, key="estf_req")
+                        razon = st.selectbox("Razón (si contestó)", RAZONES_REQ, key="razon_req")
                         area_idx = AREA_ALIADO_OPCIONES.index(fila.area_aliado) if fila.area_aliado in AREA_ALIADO_OPCIONES else 0
                         area_sel = st.selectbox("Área del aliado", AREA_ALIADO_OPCIONES, index=area_idx, key="area_req")
-                        nota = st.text_area("Observación", key="nota_req")
+                        nota = st.text_area("Observaciones", key="nota_req")
                         enviar = st.form_submit_button("Guardar gestión")
                     if enviar:
-                        if resultado == "Sí contestó" and not estado_final:
+                        if resultado == "Sí contestó" and estado_final == "—":
                             st.error("Selecciona el estado final.")
                         else:
-                            razon_final = "" if razon == "—" else razon
-                            cambios, log = procesar_gestion_requerimiento(fila, resultado, estado_final, razon_final, nota)
+                            estado_final_final = estado_final if (resultado == "Sí contestó" and estado_final != "—") else ""
+                            razon_final = razon if (resultado == "Sí contestó" and razon != "—") else ""
+                            cambios, log = procesar_gestion_requerimiento(fila, resultado, estado_final_final, razon_final, nota)
                             if area_sel != "—":
                                 cambios["area_aliado"] = area_sel
                             actualizar_fila_por_id("REQUERIMIENTOS_ALIADOS", "telefono", fila.telefono, cambios)
