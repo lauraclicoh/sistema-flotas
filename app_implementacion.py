@@ -159,7 +159,7 @@ COLS_REQUERIMIENTOS = [
     "estado_gestion", "ultimo_estado", "razon", "intentos_llamada", "intentos_sin_contacto",
     "ultimo_resultado", "proxima_gestion", "bloqueado", "fecha_ingreso", "ultima_gestion", "observaciones",
 ]
-COLS_REQUERIMIENTOS_GESTIONES = ["fecha", "telefono", "numero_requerimiento", "nombre", "resultado", "estado_final", "razon", "proxima_gestion", "observaciones"]
+COLS_REQUERIMIENTOS_GESTIONES = ["fecha", "analista", "telefono", "numero_requerimiento", "nombre", "resultado", "estado_final", "razon", "proxima_gestion", "observaciones"]
 
 COLS_COORDINADOR = [
     "documento", "nombre", "celular", "ciudad", "vehiculo", "rutas",
@@ -543,7 +543,7 @@ def procesar_gestion_requerimiento(fila, resultado, estado_final, razon, nota):
                              "proxima_gestion": hoy + timedelta(days=1), "ultimo_estado": estado_final, "razon": razon})
 
     log = {
-        "fecha": now_col(), "telefono": fila.get("telefono"), "numero_requerimiento": fila.get("numero_requerimiento"),
+        "fecha": now_col(), "analista": fila.get("analista"), "telefono": fila.get("telefono"), "numero_requerimiento": fila.get("numero_requerimiento"),
         "nombre": fila.get("nombre"), "resultado": resultado, "estado_final": estado_final_log, "razon": razon_log,
         "proxima_gestion": cambios.get("proxima_gestion", ""), "observaciones": nota,
     }
@@ -559,7 +559,7 @@ def procesar_validacion_requerimiento(fila, uso_cupo, nota):
         cambios = {"estado_gestion": "En gestión", "proxima_gestion": hoy + timedelta(days=1),
                    "ultima_gestion": now_col(), "observaciones": nota or fila.get("observaciones", "")}
     log = {
-        "fecha": now_col(), "telefono": fila.get("telefono"), "numero_requerimiento": fila.get("numero_requerimiento"),
+        "fecha": now_col(), "analista": fila.get("analista"), "telefono": fila.get("telefono"), "numero_requerimiento": fila.get("numero_requerimiento"),
         "nombre": fila.get("nombre"), "resultado": "Sí contestó",
         "estado_final": cambios.get("ultimo_estado", "Recontacto - no usó el cupo"),
         "proxima_gestion": cambios.get("proxima_gestion", ""), "observaciones": nota,
@@ -947,6 +947,23 @@ if perfil == "Analista":
 - **Último estado:** {fila.categoria or "—"}
 - **Próxima gestión:** {fila.proxima_gestion or "—"}
 """)
+                st.markdown("#### 📋 Historial de gestiones")
+                hist_plan_full = _get_historial("plan_hist", "PLANEACION_GESTIONES", COLS_PLANEACION_GESTIONES)
+                hist_aliado = (
+                    hist_plan_full[hist_plan_full.identificacion.astype(str) == str(fila.identificacion)].copy()
+                    if hist_plan_full is not None and not hist_plan_full.empty else hist_plan_full
+                )
+                if hist_aliado is None or hist_aliado.empty:
+                    st.info("Sin gestiones registradas para este aliado.")
+                else:
+                    hist_aliado["Hora"] = hist_aliado.fecha.dt.strftime("%d/%m/%Y %I:%M %p")
+                    st.dataframe(
+                        hist_aliado[["Hora", "analista", "resultado", "estado_final", "razon", "observaciones"]]
+                        .rename(columns={"analista": "Analista", "resultado": "Resultado", "estado_final": "Estado", "razon": "Razón", "observaciones": "Obs"})
+                        .sort_values("Hora", ascending=False),
+                        hide_index=True, use_container_width=True,
+                    )
+                st.markdown("---")
                 if es_verdadero(fila.bloqueado):
                     st.error("🚫 Este aliado está **bloqueado permanentemente** para Planeación.")
                 elif fila.estado_planeacion == "Validación pendiente":
@@ -1044,6 +1061,23 @@ if perfil == "Analista":
 - **Intentos de llamada:** {a_entero(fila.intentos_llamada)}
 - **Próxima gestión:** {fila.proxima_gestion or "—"}
 """)
+                st.markdown("#### 📋 Historial de gestiones")
+                hist_req_full = _get_historial("req_hist", "REQUERIMIENTOS_GESTIONES", COLS_REQUERIMIENTOS_GESTIONES)
+                hist_req_aliado = (
+                    hist_req_full[hist_req_full.telefono.astype(str) == str(fila.telefono)].copy()
+                    if hist_req_full is not None and not hist_req_full.empty else hist_req_full
+                )
+                if hist_req_aliado is None or hist_req_aliado.empty:
+                    st.info("Sin gestiones registradas para este aliado.")
+                else:
+                    hist_req_aliado["Hora"] = hist_req_aliado.fecha.dt.strftime("%d/%m/%Y %I:%M %p")
+                    st.dataframe(
+                        hist_req_aliado[["Hora", "analista", "resultado", "estado_final", "razon", "observaciones"]]
+                        .rename(columns={"analista": "Analista", "resultado": "Resultado", "estado_final": "Estado", "razon": "Razón", "observaciones": "Obs"})
+                        .sort_values("Hora", ascending=False),
+                        hide_index=True, use_container_width=True,
+                    )
+                st.markdown("---")
                 if es_verdadero(fila.bloqueado):
                     st.error("🚫 Este requerimiento está **bloqueado permanentemente**.")
                 elif fila.estado_gestion == "Cerrado":
@@ -1055,7 +1089,8 @@ if perfil == "Analista":
                         nota = st.text_area("Observación", key="nota_validacion_req")
                         enviar = st.form_submit_button("Guardar validación")
                     if enviar:
-                        cambios, log = procesar_validacion_requerimiento(fila, uso == "Sí", nota)
+                        fila_ctx = dict(fila); fila_ctx["analista"] = nombre
+                        cambios, log = procesar_validacion_requerimiento(fila_ctx, uso == "Sí", nota)
                         actualizar_fila_por_id("REQUERIMIENTOS_ALIADOS", "telefono", fila.telefono, cambios)
                         _actualizar_roster_local("req_roster", "telefono", fila.telefono, cambios)
                         agregar_filas("REQUERIMIENTOS_GESTIONES", [[_safe_str(log.get(c, "")) for c in COLS_REQUERIMIENTOS_GESTIONES]])
@@ -1081,7 +1116,8 @@ if perfil == "Analista":
                         else:
                             estado_final_final = estado_final if (resultado == "Sí contestó" and estado_final != "—") else ""
                             razon_final = razon if (resultado == "Sí contestó" and razon != "—") else ""
-                            cambios, log = procesar_gestion_requerimiento(fila, resultado, estado_final_final, razon_final, nota)
+                            fila_ctx = dict(fila); fila_ctx["analista"] = nombre
+                            cambios, log = procesar_gestion_requerimiento(fila_ctx, resultado, estado_final_final, razon_final, nota)
                             if area_sel != "—":
                                 cambios["area_aliado"] = area_sel
                             actualizar_fila_por_id("REQUERIMIENTOS_ALIADOS", "telefono", fila.telefono, cambios)
