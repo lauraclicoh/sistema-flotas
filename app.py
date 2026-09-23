@@ -1,10 +1,12 @@
 import streamlit as st
 import pandas as pd
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 import gspread
 from google.oauth2.service_account import Credentials
 import plotly.express as px
 import time
+import re
+import unicodedata
 from zoneinfo import ZoneInfo
 st.set_page_config(layout="wide", page_title="🚚 Gestión Aliados Programación", page_icon="🚚")
 TZ_COL = ZoneInfo("America/Bogota")
@@ -44,6 +46,32 @@ NO_RESPONDEN      = ["Apagado","Fuera de servicio","No contestó","Número errad
 NO_VOLVER_ESTADOS = ["Aliado Rechaza la oferta","Empleado","Point"]
 NO_VOLVER_RAZONES = ["No le interesa / cuestiones personales"]
 COLS_CRM = ["intentos","ultimo_resultado","ultimo_estado","ultima_razon","fecha_gestion","proxima_gestion"]
+
+# =========================================================================
+# CUMPLIMIENTO DE CARGUE: ¿los aliados que dijeron que iban a cargar, cargaron?
+# Se alimenta con la exportación del tablero de Looker "Servicio - Operaciones
+# Latam / Cumplimiento Diario Aliados" (una fila por hoja de ruta), que se va
+# acumulando en la hoja CARGUES_REALES del spreadsheet "GestionAliados".
+# Mismo patrón que en Planeación de Aliados (app_implementacion.py), adaptado
+# a las columnas de HISTORICO/BASE de Programación: aquí no existe un paso de
+# "validación" separado, así que toda fila de HISTORICO cuenta como llamada,
+# y el estado de compromiso es "Interesado llega a cargue/ Programado"
+# (el que ya usa ESTADOS_FINALES de este archivo).
+# ASUNCIÓN: la hoja CARGUES_REALES debe existir como pestaña en el spreadsheet
+# "GestionAliados"; si no existe, créala manualmente con estos encabezados en
+# la fila 1: cedula, nombre, ciudad, hoja_ruta, fecha_cargue, estado_hr,
+# paquetes, entregados, gestionados, fecha_subida.
+# =========================================================================
+HOJA_CARGUES = "CARGUES_REALES"
+COLS_CARGUES_REALES = ["cedula", "nombre", "ciudad", "hoja_ruta", "fecha_cargue", "estado_hr",
+                        "paquetes", "entregados", "gestionados", "fecha_subida"]
+# Solo cuentan como cargue las hojas de ruta que el aliado sí sacó a la calle.
+# "Disponible" (nadie la tomó) y "Tomado" (asignada pero sin salir) no cuentan.
+ESTADOS_HR_CARGUE = {"abierto", "cerrado"}
+ESTADO_COMPROMISO = "Interesado llega a cargue/ Programado"
+RAZONES_VALIDACION = {"Interesado carga hoy/ reserva"}
+DIAS_SEMANA = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"]
+ANALISTA_CUMPLIMIENTO_DEFECTO = "Diana Paola Rueda Jimenez"
 # Una única fuente de verdad para el acceso de coordinación. Configure
 # `coordinator_password` en secrets.toml; ambos módulos la consumen aquí.
 COORDINATOR_PASSWORD = st.secrets.get("coordinator_password", "clicoh")
@@ -573,6 +601,311 @@ def guardar_reparto(df):
     reemplazar_hoja("REPARTO", df)
     st.session_state["reparto_df"] = df
     st.session_state["reparto_stale"] = False
+
+# =========================================================================
+# CUMPLIMIENTO DE CARGUE — utilidades
+# (portado desde app_implementacion.py, adaptado a las columnas de
+# HISTORICO/BASE de Programación: "estado" en vez de "estado_final")
+# =========================================================================
+
+def _normalizar_tel(valor):
+    """
+    Deja solo dígitos y quita el '.0' que Excel pudo haber dejado en un
+    teléfono o cédula. Se usa para cruzar identificaciones entre BASE,
+    HISTORICO y la exportación de Looker aunque el formato no sea idéntico.
+    """
+    v = str(valor).strip()
+    if v.endswith(".0"):
+        v = v[:-2]
+    return "".join(ch for ch in v if ch.isdigit())
+
+def _norm_encabezado(c):
+    """'Hoja de Ruta', 'hoja_ruta' y 'HOJA DE RUTA ' quedan igual: sin tildes, minúsculas, espacios simples."""
+    s = "".join(ch for ch in unicodedata.normalize("NFD", str(c)) if unicodedata.category(ch) != "Mn")
+    return " ".join(s.lower().replace("_", " ").split())
+
+def _ciudad_corta(valor):
+    """'MELI Cali', 'CALI - VALLE DEL CAUCA' y 'Meli Cali' -> 'Cali'."""
+    s = _norm_encabezado(valor).upper()
+    if s in ("", "-", "NO APLICA", "NAN"):
+        return "Sin ciudad"
+    for pref in ("POINT ", "XPT ", "MELI "):
+        if s.startswith(pref):
+            s = s[len(pref):]
+    s = s.replace("MELI", "").replace("PRIMERA MILLA", "").strip()
+    s = s.split(" - ")[0].split("/")[0].replace(" CLARO", "").replace("D.C.", "").strip()
+    s = {"SAN JOSE DE CUCUTA": "CUCUTA", "CARTAGENA DE INDIAS": "CARTAGENA"}.get(s, s)
+    return s.title() if s else "Sin ciudad"
+
+_MESES_ES = {"ene": 1, "feb": 2, "mar": 3, "abr": 4, "may": 5, "jun": 6, "jul": 7, "ago": 8,
+             "sep": 9, "set": 9, "oct": 10, "nov": 11, "dic": 12}
+
+def _parse_fecha_cargue_looker(serie: pd.Series) -> pd.Series:
+    """Acepta 'sept 22, 2026' (formato de Looker), fechas de Excel, '2026-09-22', '22/09/2026', '20260922' y seriales."""
+    out = []
+    for v in serie:
+        if isinstance(v, (pd.Timestamp, datetime, date)):
+            out.append(pd.Timestamp(v))
+            continue
+        s = _safe_str(v).strip()
+        if s.endswith(".0"):
+            s = s[:-2]
+        if not s or s.lower() in ("nan", "none", "nat"):
+            out.append(pd.NaT)
+            continue
+        m = re.match(r"^([a-zA-Z]{3})[a-zA-Z.]*\s+(\d{1,2}),?\s+(\d{4})", _norm_encabezado(s))
+        if m and m.group(1) in _MESES_ES:
+            out.append(pd.Timestamp(int(m.group(3)), _MESES_ES[m.group(1)], int(m.group(2))))
+            continue
+        if s.isdigit() and len(s) == 8:
+            out.append(pd.to_datetime(s, format="%Y%m%d", errors="coerce"))
+            continue
+        try:
+            n = float(s)
+            if 20000 < n < 80000:
+                out.append(pd.Timestamp("1899-12-30") + pd.Timedelta(days=n))
+                continue
+        except ValueError:
+            pass
+        iso = len(s) >= 10 and s[4] in "-/"
+        out.append(pd.to_datetime(s, dayfirst=not iso, errors="coerce"))
+    return pd.Series(out, index=serie.index)
+
+# Columnas de la exportación de Looker (ya normalizadas con _norm_encabezado).
+# Las demás columnas del archivo se ignoran.
+ALIAS_CARGUES = {
+    "identificacion": "cedula",
+    "nombre aliado": "nombre",
+    "ciudad": "ciudad",
+    "hjrt id": "hoja_ruta",
+    "creacion": "fecha_cargue",
+    "estado hr": "estado_hr",
+    "tot paq": "paquetes",
+    "entregados": "entregados",
+    "paq gestionados por aliado": "gestionados",
+}
+COLS_LOOKER_OBLIGATORIAS = {"cedula": "identificacion", "hoja_ruta": "HJRT ID", "fecha_cargue": "Creacion", "paquetes": "Tot Paq"}
+
+def _leer_archivo_subido(archivo):
+    return pd.read_csv(archivo) if archivo.name.lower().endswith("csv") else pd.read_excel(archivo)
+
+def _get_cargues(forzar=False):
+    """Mismo patrón de caché que _get_base(): vive en session_state y solo se relee de Sheets al invalidar o forzar."""
+    if forzar or "cargues_df" not in st.session_state or st.session_state.get("cargues_stale", True):
+        df = leer_hoja(HOJA_CARGUES, COLS_CARGUES_REALES)
+        for c in COLS_CARGUES_REALES:
+            if c not in df.columns:
+                df[c] = ""
+        st.session_state["cargues_df"] = df[COLS_CARGUES_REALES].fillna("")
+        st.session_state["cargues_stale"] = False
+    return st.session_state["cargues_df"]
+
+def _invalidar_cargues():
+    st.session_state["cargues_stale"] = True
+
+def cargar_incremental_cargues(archivo):
+    """
+    Suma a CARGUES_REALES la exportación de Looker tal como sale del tablero.
+    La llave es la hoja de ruta (HJRT ID): si ya existía, se reemplaza con lo
+    que trae el archivo nuevo, así se actualizan estado, entregados y
+    gestionados sin duplicar filas.
+    """
+    df = _leer_archivo_subido(archivo)
+    df.columns = [_norm_encabezado(c) for c in df.columns]
+    df = df.rename(columns={k: v for k, v in ALIAS_CARGUES.items() if k in df.columns})
+    df = df.loc[:, ~df.columns.duplicated()]
+    faltan = [original for interno, original in COLS_LOOKER_OBLIGATORIAS.items() if interno not in df.columns]
+    if faltan:
+        st.error(f"Al archivo le faltan columnas del tablero: {', '.join(faltan)}. Descárgalo de nuevo desde Looker sin quitar columnas.")
+        return None
+
+    texto = lambda col: df[col].map(lambda v: _safe_str(v).strip()) if col in df.columns else ""
+    numero = lambda col: pd.to_numeric(df[col], errors="coerce").fillna(0).round().astype(int) if col in df.columns else 0
+    d = pd.DataFrame({
+        "cedula": df["cedula"].map(_normalizar_tel),
+        "nombre": texto("nombre").map(lambda v: " ".join(v.split())) if "nombre" in df.columns else "",
+        "ciudad": texto("ciudad"),
+        "hoja_ruta": df["hoja_ruta"].map(lambda v: _safe_str(v).strip()[:-2] if _safe_str(v).strip().endswith(".0") else _safe_str(v).strip()),
+        "fecha": _parse_fecha_cargue_looker(df["fecha_cargue"]),
+        "estado_hr": texto("estado_hr"),
+        "paquetes": numero("paquetes"), "entregados": numero("entregados"), "gestionados": numero("gestionados"),
+    })
+    validas = (d.cedula != "") & (d.hoja_ruta != "") & d.fecha.notna()
+    descartadas = int((~validas).sum())
+    d = d[validas].copy()
+    d["fecha_cargue"] = d.fecha.dt.strftime("%Y-%m-%d")
+    d = d.drop_duplicates("hoja_ruta", keep="last")
+    d["fecha_subida"] = now_col().strftime("%Y-%m-%d %H:%M:%S")
+    d = d[COLS_CARGUES_REALES].astype(str)
+
+    existente = _get_cargues(forzar=True)
+    llave_exist = existente.hoja_ruta.astype(str).str.strip()
+    actualizados = int(d.hoja_ruta.isin(set(llave_exist)).sum())
+    nuevos = len(d) - actualizados
+    combinado = pd.concat([existente[~llave_exist.isin(set(d.hoja_ruta))], d], ignore_index=True)
+    combinado = combinado.sort_values(["fecha_cargue", "cedula"]).astype(str).replace("nan", "")
+    reemplazar_hoja(HOJA_CARGUES, combinado)
+    st.session_state["cargues_df"] = combinado
+    st.session_state["cargues_stale"] = False
+    rango = (d.fecha_cargue.min(), d.fecha_cargue.max()) if len(d) else (None, None)
+    return {"filas": len(df), "nuevos": nuevos, "actualizados": actualizados, "descartadas": descartadas,
+            "desde": rango[0], "hasta": rango[1]}
+
+def construir_cumplimiento(hist, cargues, aliados, analista, f1, f2):
+    """
+    hist: HISTORICO de Programación · cargues: CARGUES_REALES · aliados: tabla
+    con identificacion/nombre/ciudad (de BASE). Devuelve KPIs, detalle por
+    aliado comprometido, cruce por resultado de todos los que contestaron y
+    tablas por día de la semana, por día y por ciudad.
+    Regla: cuenta como cargue una hoja de ruta creada desde el DÍA SIGUIENTE
+    a la llamada; si no la hay, es "No cargó".
+    """
+    h = hist.copy()
+    h["identificacion"] = h.identificacion.map(_normalizar_tel)
+    for c in ["analista", "resultado", "estado", "razon"]:
+        h[c] = h[c].astype(str).str.strip().replace({"nan": "", "None": ""})
+    h = h.sort_values("fecha")
+    h = h[(h.fecha.dt.date >= f1) & (h.fecha.dt.date <= f2)]
+    if analista != "Todas":
+        h = h[h.analista == analista]
+    llamadas = h.copy()  # en Programación toda fila de HISTORICO es una llamada (no hay paso de validación separado)
+
+    # ---- cargues reales
+    c = cargues.copy()
+    c["cedula"] = c.cedula.map(_normalizar_tel)
+    c["fecha"] = pd.to_datetime(c.fecha_cargue, errors="coerce")
+    for col in ["paquetes", "entregados", "gestionados"]:
+        c[col] = pd.to_numeric(c[col], errors="coerce").fillna(0)
+    c = c.dropna(subset=["fecha"])
+    estado_hr = c.estado_hr.astype(str).str.strip().str.lower()
+    c = c[estado_hr.isin(ESTADOS_HR_CARGUE) | (estado_hr == "")]  # solo HR que sí salieron
+    por_cedula = {k: g for k, g in c.groupby("cedula")}
+    salto = timedelta(days=1)  # el cargue se cuenta desde el día siguiente a la llamada
+
+    def cruce(ident, fecha_llamada):
+        umbral = fecha_llamada.normalize() + salto
+        g = por_cedula.get(ident)
+        post = g[g.fecha >= umbral] if g is not None else c.iloc[0:0]
+        antes = g[g.fecha < fecha_llamada.normalize()] if g is not None else c.iloc[0:0]
+        rutas = int(post.hoja_ruta.nunique())
+        res = "✅ Cargó" if rutas > 0 else "❌ No cargó"
+        primer = post.fecha.min() if rutas else pd.NaT
+        return {
+            "resultado": res, "rutas_despues": rutas, "paquetes_despues": int(post.paquetes.sum()),
+            "entregados_despues": int(post.entregados.sum()), "gestionados_despues": int(post.gestionados.sum()),
+            "primer_cargue": primer.date() if pd.notna(primer) else None,
+            "dias_hasta_cargar": int((primer - fecha_llamada.normalize()).days) if pd.notna(primer) else None,
+            "ultimo_cargue_antes": antes.fecha.max().date() if not antes.empty else None,
+        }
+
+    # Nombre y ciudad: se toma el último dato no vacío de BASE o de la exportación de Looker
+    info = pd.concat([aliados, cargues.rename(columns={"cedula": "identificacion"})[["identificacion", "nombre", "ciudad"]]
+                      .assign(ciudad=lambda t: t.ciudad.map(_ciudad_corta))], ignore_index=True)
+    info["identificacion"] = info.identificacion.map(_normalizar_tel)
+    info = info.replace({"": pd.NA, "Sin ciudad": pd.NA, "nan": pd.NA}).groupby("identificacion").last()
+    nombre_de = lambda i: info.nombre.get(i) if pd.notna(info.nombre.get(i)) else ""
+    ciudad_de = lambda i: info.ciudad.get(i) if pd.notna(info.ciudad.get(i)) else "Sin ciudad"
+
+    # ---- aliados comprometidos (dijeron que iban a cargar)
+    marca = h.estado.isin([ESTADO_COMPROMISO]) | h.razon.isin(RAZONES_VALIDACION)
+    comp = h[marca].sort_values("fecha").groupby("identificacion", as_index=False).first()
+    filas = []
+    for r in comp.itertuples():
+        x = cruce(r.identificacion, r.fecha)
+        filas.append({
+            "cedula": r.identificacion, "nombre": nombre_de(r.identificacion), "ciudad": ciudad_de(r.identificacion),
+            "fecha_llamada": r.fecha.date(), "dia": DIAS_SEMANA[r.fecha.weekday()], "analista": r.analista,
+            "estado_registrado": r.estado, "razon": r.razon, **x,
+        })
+    detalle = pd.DataFrame(filas, columns=[
+        "cedula", "nombre", "ciudad", "fecha_llamada", "dia", "analista", "estado_registrado", "razon",
+        "resultado", "rutas_despues", "paquetes_despues", "entregados_despues", "gestionados_despues",
+        "primer_cargue", "dias_hasta_cargar", "ultimo_cargue_antes"])
+
+    # ---- todos los que contestaron, según lo que respondieron
+    cont = llamadas[llamadas.resultado == "Sí contestó"]
+    por_estado = pd.DataFrame(columns=["Respuesta en la llamada", "Aliados", "Cargaron", "No cargaron", "% cumplimiento", "Hojas de ruta", "Paquetes", "Entregados"])
+    if not cont.empty:
+        primera = cont.groupby("identificacion").fecha.min()
+        ultima_resp = cont.groupby("identificacion").estado.last().replace("", "Sin estado")
+        filas_e = []
+        for ident, f0 in primera.items():
+            x = cruce(ident, f0)
+            filas_e.append({"estado": ultima_resp[ident], **x})
+        e = pd.DataFrame(filas_e)
+        e["cargo"] = e.resultado == "✅ Cargó"
+        e["no"] = e.resultado == "❌ No cargó"
+        por_estado = e.groupby("estado").agg(Aliados=("estado", "size"), Cargaron=("cargo", "sum"), **{"No cargaron": ("no", "sum")},
+                                             **{"Hojas de ruta": ("rutas_despues", "sum")}, Paquetes=("paquetes_despues", "sum"),
+                                             Entregados=("entregados_despues", "sum")).reset_index()
+        medibles = por_estado.Cargaron + por_estado["No cargaron"]
+        por_estado["% cumplimiento"] = (por_estado.Cargaron / medibles.where(medibles > 0) * 100).round(1)
+        por_estado = por_estado.rename(columns={"estado": "Respuesta en la llamada"}).sort_values("Aliados", ascending=False)
+        por_estado = por_estado[["Respuesta en la llamada", "Aliados", "Cargaron", "No cargaron", "% cumplimiento", "Hojas de ruta", "Paquetes", "Entregados"]]
+
+    # ---- KPIs generales
+    n = len(llamadas)
+    dias = llamadas.fecha.dt.date.nunique()
+    contestadas = int((llamadas.resultado == "Sí contestó").sum())
+    horas = 0.0
+    if n:
+        horas = llamadas.groupby([llamadas.analista, llamadas.fecha.dt.date]).fecha.agg(
+            lambda s: (s.max() - s.min()).total_seconds() / 3600).sum()
+    cargaron = int((detalle.resultado == "✅ Cargó").sum())
+    no_cargaron = int((detalle.resultado == "❌ No cargó").sum())
+
+    # ---- por día de la semana
+    dw = pd.DataFrame({"Día": DIAS_SEMANA})
+    dw["Llamadas"] = [int((llamadas.fecha.dt.weekday == i).sum()) for i in range(7)]
+    dw["Contestaron"] = [int(((llamadas.fecha.dt.weekday == i) & (llamadas.resultado == "Sí contestó")).sum()) for i in range(7)]
+    dias_det = pd.to_datetime(detalle.fecha_llamada).dt.weekday if not detalle.empty else pd.Series(dtype=int)
+    dw["Dijeron que cargarían"] = [int((dias_det == i).sum()) for i in range(7)]
+    dw["Cargaron"] = [int(((dias_det == i) & (detalle.resultado == "✅ Cargó")).sum()) for i in range(7)]
+    dw["Paquetes"] = [int(detalle.paquetes_despues[dias_det == i].sum()) for i in range(7)]
+    dw = dw[(dw.Llamadas > 0) | (dw["Dijeron que cargarían"] > 0)]
+
+    def mejor(tabla, col_nombre):
+        if tabla.empty:
+            return "—"
+        claves = [k for k in ["Cargaron", "Dijeron que cargarían", "Contestaron"] if k in tabla.columns]
+        orden = tabla.sort_values(claves, ascending=False)
+        return orden.iloc[0][col_nombre]
+
+    # ---- por ciudad
+    if not detalle.empty:
+        cy = detalle.groupby("ciudad").agg(**{"Dijeron que cargarían": ("cedula", "size")},
+                                           Cargaron=("resultado", lambda s: int((s == "✅ Cargó").sum())),
+                                           **{"No cargaron": ("resultado", lambda s: int((s == "❌ No cargó").sum()))},
+                                           **{"Hojas de ruta": ("rutas_despues", "sum")}, Paquetes=("paquetes_despues", "sum"),
+                                           Entregados=("entregados_despues", "sum")).reset_index()
+        med = cy.Cargaron + cy["No cargaron"]
+        cy["% cumplimiento"] = (cy.Cargaron / med.where(med > 0) * 100).round(1)
+        cy = cy.rename(columns={"ciudad": "Ciudad"}).sort_values(["Cargaron", "Dijeron que cargarían"], ascending=False)
+    else:
+        cy = pd.DataFrame(columns=["Ciudad", "Dijeron que cargarían", "Cargaron", "No cargaron", "Hojas de ruta", "Paquetes", "Entregados", "% cumplimiento"])
+
+    por_dia = llamadas.groupby(llamadas.fecha.dt.date).agg(Llamadas=("resultado", "size"),
+                                                          Contestaron=("resultado", lambda s: int((s == "Sí contestó").sum()))).reset_index()
+    por_dia.columns = ["Fecha", "Llamadas", "Contestaron"]
+
+    kpis = {
+        "llamadas": n, "dias": dias, "prom_dia": round(n / dias, 1) if dias else 0,
+        "contactabilidad": round(contestadas / n * 100, 1) if n else 0,
+        "llamadas_hora": round(n / horas, 1) if horas else 0,
+        "interesados": int((llamadas.estado == ESTADO_COMPROMISO).sum()),
+        "mejor_dia": mejor(dw, "Día"), "mejor_ciudad": mejor(cy, "Ciudad"),
+        "comprometidos": len(detalle), "cargaron": cargaron, "no_cargaron": no_cargaron,
+        "cumplimiento": round(cargaron / len(detalle) * 100, 1) if len(detalle) else None,
+        "rutas": int(detalle.rutas_despues.sum()) if not detalle.empty else 0,
+        "paquetes": int(detalle.paquetes_despues.sum()) if not detalle.empty else 0,
+        "entregados": int(detalle.entregados_despues.sum()) if not detalle.empty else 0,
+        "gestionados": int(detalle.gestionados_despues.sum()) if not detalle.empty else 0,
+        "dias_prom_cargar": round(detalle.dias_hasta_cargar.dropna().astype(float).mean(), 1) if detalle.dias_hasta_cargar.notna().any() else None,
+        "corte": c.fecha.max().date() if not c.empty else None,
+    }
+    return {"kpis": kpis, "detalle": detalle, "por_estado": por_estado, "por_semana": dw, "por_ciudad": cy, "por_dia": por_dia}
+
+
 # ================================================================
 # UI
 # ================================================================
@@ -599,9 +932,10 @@ with st.sidebar:
 if perfil == "Coordinador":
     base = _get_base()
     hist = _get_hist()
-    tab1,tab2,tab3,tab4,tab5,tab6,tab7,tab8 = st.tabs([
+    tab1,tab2,tab3,tab4,tab5,tab6,tab7,tab8,tab9 = st.tabs([
         "📊 Hoy","📅 Histórico & KPIs","🔍 Buscar Aliado",
         "🔥 Estado CRM","📤 Cargar Base","🎯 Asignación","⚙️ Reglas","🗺️ Cobertura por Zona",
+        "🚚 Cumplimiento de cargue",
     ])
     with tab1:
         st.subheader("Auditoría de Gestión")
@@ -902,6 +1236,129 @@ if perfil == "Coordinador":
                            color="% Cobertura",color_continuous_scale=["#dc3545","#ffc107","#28a745"],range_color=[0,100])
             fig_pct.update_layout(coloraxis_showscale=False,yaxis_title=""); st.plotly_chart(fig_pct,use_container_width=True)
             st.download_button("📥 Descargar reporte (CSV)",df_res.to_csv(index=False).encode("utf-8"),f"cobertura_{fz1}_{fz2}.csv","text/csv")
+
+    with tab9:
+        st.subheader("🚚 ¿Los aliados que dijeron que iban a cargar, cargaron?")
+
+        with st.expander("📥 Subir hojas de ruta desde Looker", expanded=False):
+            st.caption("Descarga la tabla del tablero 'Servicio - Operaciones Latam / Cumplimiento Diario Aliados' "
+                       "(⋮ → Exportar → CSV o Excel) y súbela tal cual, sin quitar columnas. Se usan: identificacion, "
+                       "HJRT ID, Creacion, Estado HR, Nombre Aliado, Ciudad, Tot Paq, Entregados y Paq Gestionados por Aliado. "
+                       f"Cada carga se suma al historial (hoja {HOJA_CARGUES}); si una hoja de ruta ya estaba, se actualiza.")
+            archivo_carg = st.file_uploader("Exportación de Looker (CSV o Excel)", type=["xlsx", "xls", "csv"], key="up_cargues_prog")
+            if archivo_carg is not None and st.button("🚀 Cargar hojas de ruta", key="btn_up_cargues_prog"):
+                try:
+                    with st.spinner("Cruzando hojas de ruta..."):
+                        r = cargar_incremental_cargues(archivo_carg)
+                    if r:
+                        st.success(f"✅ {r['nuevos']} hojas de ruta nuevas · {r['actualizados']} actualizadas "
+                                   f"(de {r['filas']} filas, del {r['desde']} al {r['hasta']}).")
+                        if r["descartadas"]:
+                            st.warning(f"{r['descartadas']} filas no se tomaron por no tener identificacion, HJRT ID o Creacion válida.")
+                except Exception as e:
+                    st.error(f"No se pudo procesar el archivo: {e}")
+
+        cf1, cf2, cf3 = st.columns([2, 1.2, 1.2])
+        opciones_an = ["Todas"] + NOMBRES_ANALISTAS
+        an_sel = cf1.selectbox("Analista", opciones_an,
+                               index=opciones_an.index(ANALISTA_CUMPLIMIENTO_DEFECTO) if ANALISTA_CUMPLIMIENTO_DEFECTO in opciones_an else 0,
+                               key="cum_an_prog")
+        hoy_c = now_col().date()
+        c_f1 = cf2.date_input("Desde", hoy_c.replace(day=1), max_value=hoy_c, key="cum_f1_prog")
+        c_f2 = cf3.date_input("Hasta", hoy_c, max_value=hoy_c, key="cum_f2_prog")
+
+        if st.button("🔄 Actualizar datos", key="btn_ref_cum_prog"):
+            _invalidar_cargues()
+            hist_cum = _get_hist(force_reload=True)
+        else:
+            hist_cum = _get_hist()
+        cargues_cum = _get_cargues()
+
+        if base is not None:
+            aliados_cum = pd.DataFrame({
+                "identificacion": base["identificacion"],
+                "nombre": base["mensajero"] if "mensajero" in base.columns else "",
+                "ciudad": base["zona"].map(_ciudad_corta) if "zona" in base.columns else "Sin ciudad",
+            })
+        else:
+            aliados_cum = pd.DataFrame(columns=["identificacion", "nombre", "ciudad"])
+
+        if hist_cum is None or hist_cum.empty:
+            st.info("Aún no hay gestiones registradas en HISTORICO.")
+        else:
+            R = construir_cumplimiento(hist_cum, cargues_cum, aliados_cum, an_sel, c_f1, c_f2)
+            k = R["kpis"]
+
+            st.markdown("#### Gestión de llamadas")
+            m = st.columns(5)
+            m[0].metric("📞 Llamadas", k["llamadas"])
+            m[1].metric("📅 Días con gestión", k["dias"])
+            m[2].metric("Prom. llamadas/día", k["prom_dia"])
+            m[3].metric("% Contactabilidad", f"{k['contactabilidad']}%")
+            m[4].metric("Llamadas/hora", k["llamadas_hora"])
+            m2 = st.columns(3)
+            m2[0].metric("🚗 Interesados", k["interesados"])
+            m2[1].metric("Día más fructífero", k["mejor_dia"])
+            m2[2].metric("Ciudad con más efecto", k["mejor_ciudad"])
+
+            st.markdown("#### Compromiso vs cargue real")
+            if cargues_cum.empty:
+                st.warning("Todavía no hay hojas de ruta cargadas. Sube la exportación de Looker arriba para ver quién cargó.")
+            else:
+                st.caption((f"Hojas de ruta disponibles hasta el {k['corte']:%d/%m/%Y}. " if k["corte"] else "")
+                           + "Cuenta como cargue una hoja de ruta (Abierta o Cerrada) creada desde el día siguiente a la llamada.")
+            n1, n2, n3, n4 = st.columns(4)
+            n1.metric("Dijeron que cargarían", k["comprometidos"])
+            n2.metric("✅ Cargaron", k["cargaron"])
+            n3.metric("❌ No cargaron", k["no_cargaron"])
+            n4.metric("% Cumplimiento", f"{k['cumplimiento']}%" if k["cumplimiento"] is not None else "—",
+                      help="Cargaron / Dijeron que cargarían.")
+            n5, n6, n7, n8 = st.columns(4)
+            n5.metric("🛣️ Hojas de ruta", k["rutas"], help="Solo HR en estado Abierto o Cerrado.")
+            n6.metric("📦 Paquetes (Tot Paq)", k["paquetes"])
+            n7.metric("✅ Entregados", k["entregados"])
+            n8.metric("% Gestión", f"{round(k['gestionados'] / k['paquetes'] * 100, 1)}%" if k["paquetes"] else "—",
+                      help="Paq Gestionados por Aliado / Tot Paq")
+            if k["dias_prom_cargar"] is not None:
+                st.caption(f"En promedio tardaron {k['dias_prom_cargar']} días desde la llamada hasta cargar.")
+
+            g1, g2 = st.columns(2)
+            with g1:
+                sem = R["por_semana"]
+                if not sem.empty:
+                    larga = sem.melt(id_vars="Día", value_vars=["Llamadas", "Contestaron", "Dijeron que cargarían", "Cargaron"],
+                                     var_name="Indicador", value_name="Cantidad")
+                    st.plotly_chart(px.bar(larga, x="Día", y="Cantidad", color="Indicador", barmode="group",
+                                           title="Gestión por día de la semana",
+                                           category_orders={"Día": DIAS_SEMANA}), use_container_width=True)
+            with g2:
+                pdia = R["por_dia"]
+                if not pdia.empty:
+                    larga_d = pdia.melt(id_vars="Fecha", value_vars=["Llamadas", "Contestaron"], var_name="Indicador", value_name="Cantidad")
+                    st.plotly_chart(px.bar(larga_d, x="Fecha", y="Cantidad", color="Indicador", barmode="group",
+                                           title="Llamadas por día"), use_container_width=True)
+
+            st.markdown("##### Cargue según lo que respondieron en la llamada (todos los que contestaron)")
+            st.dataframe(R["por_estado"], hide_index=True, use_container_width=True)
+
+            st.markdown("##### Cumplimiento por ciudad")
+            st.dataframe(R["por_ciudad"], hide_index=True, use_container_width=True)
+
+            st.markdown("##### Detalle por aliado comprometido")
+            det = R["detalle"]
+            filtro_res = st.multiselect("Resultado", ["✅ Cargó", "❌ No cargó"],
+                                        default=["✅ Cargó", "❌ No cargó"], key="cum_filtro_prog")
+            det_f = det[det.resultado.isin(filtro_res)]
+            st.dataframe(det_f.rename(columns={
+                "cedula": "Cédula", "nombre": "Nombre", "ciudad": "Ciudad", "fecha_llamada": "Fecha llamada", "dia": "Día",
+                "analista": "Analista", "estado_registrado": "Estado registrado", "razon": "Razón", "resultado": "Resultado",
+                "rutas_despues": "Hojas de ruta después", "paquetes_despues": "Paquetes después",
+                "entregados_despues": "Entregados después", "gestionados_despues": "Gestionados después", "primer_cargue": "Primer cargue",
+                "dias_hasta_cargar": "Días hasta cargar", "ultimo_cargue_antes": "Último cargue antes de la llamada"}),
+                hide_index=True, use_container_width=True)
+            st.download_button("📥 Descargar detalle (CSV)", det.to_csv(index=False).encode("utf-8-sig"),
+                               f"cumplimiento_cargue_{c_f1}_{c_f2}.csv", "text/csv", key="dl_cum_prog")
+
 # ================================================================
 # ANALISTA
 # ================================================================
