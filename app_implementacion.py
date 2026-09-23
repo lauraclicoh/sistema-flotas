@@ -65,7 +65,7 @@ RAZONES = [
     "Tiene trabajo fijo",
     "Fuera de la ciudad",
     "Aliado no carga en HUB",
-    "Pendiente confirmación"
+    "Pendiente confirmación",
     "Ocasional no fijo",
     "Se reserva",
     "Point",
