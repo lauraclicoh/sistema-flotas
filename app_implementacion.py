@@ -51,12 +51,13 @@ ESTADOS_FINALES_ALIADOS = [
     "Aliado Fleet/Delivery no acepta hub/Carga en otra operacion",
     "Interesado Carga/Reserva",
     "Interesado esporádico no fijo",
+    "Pendiente confirmación",
     "Point",
 ]
 
 RAZONES = [
     "—",
-    "Interesado carga hoy",
+    "Interesado carga ",
     "No le interesa / cuestiones personales",
     "No tiene Vh / Vh dañado",
     "Peso / Volumen / recorrido",
@@ -64,6 +65,7 @@ RAZONES = [
     "Tiene trabajo fijo",
     "Fuera de la ciudad",
     "Aliado no carga en HUB",
+    "Pendiente confirmación"
     "Ocasional no fijo",
     "Se reserva",
     "Point",
@@ -83,11 +85,13 @@ ESTADOS_FINALES_REQ = [
     "Aliado rechaza la oferta",
     "Carga en otra operación",
     "Interesado en carga / reserva",
+    "Pendiente confirmación"
     "Interesado esporádico, no fijo",
 ]
 RAZONES_REQ = [
     "—",
-    "Interesado pendiente de cargue",
+    "Interesado carga",
+    "Pendiente confirmación"
     "No le interesa / cuestiones personales",
     "No tiene vehículo / vehículo dañado",
     "Peso / volumen / recorrido",
