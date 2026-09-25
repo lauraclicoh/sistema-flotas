@@ -3,3 +3,11 @@ pandas>=2.2
 gspread>=6.1
 google-auth>=2.34
 openpyxl>=3.1
+streamlit
+pandas
+openpyxl
+xlrd
+gspread
+google-auth
+google-auth-oauthlib
+plotly
