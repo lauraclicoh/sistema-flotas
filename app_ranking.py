@@ -143,7 +143,14 @@ def leer_rutas(forzar_recarga=False):
     return df
 
 
+def limpiar_nombres_columnas(df):
+    """Quita BOM invisible y espacios sobrantes de los nombres de columna."""
+    df.columns = [str(c).replace("\ufeff", "").strip() for c in df.columns]
+    return df
+
+
 def normalizar_diario(df_origen):
+    df_origen = limpiar_nombres_columnas(df_origen)
     faltantes = [c for c in MAPEO_DIARIO if c not in df_origen.columns]
     if faltantes:
         raise ValueError(f"Al archivo Diario le faltan columnas: {faltantes}")
@@ -207,6 +214,7 @@ def leer_contexto(forzar_recarga=False):
 
 
 def normalizar_general(df_origen, fecha_carga):
+    df_origen = limpiar_nombres_columnas(df_origen)
     faltantes = [c for c in MAPEO_GENERAL if c not in df_origen.columns]
     if faltantes:
         raise ValueError(f"Al archivo General le faltan columnas: {faltantes}")
@@ -305,7 +313,7 @@ with tab_cargar:
 
     if archivo_diario is not None:
         try:
-            df_origen = pd.read_csv(archivo_diario, sep=None, engine="python")
+            df_origen = pd.read_csv(archivo_diario, sep=None, engine="python", encoding="utf-8-sig")
             df_norm = normalizar_diario(df_origen)
             st.success(f"{len(df_norm)} filas válidas leídas, cubriendo {df_norm['Fecha'].nunique()} fechas distintas.")
             st.dataframe(df_norm.head(8), use_container_width=True)
@@ -337,7 +345,7 @@ with tab_cargar:
     if archivo_general is not None:
         try:
             if archivo_general.name.lower().endswith(".csv"):
-                df_origen_g = pd.read_csv(archivo_general, sep=None, engine="python")
+                df_origen_g = pd.read_csv(archivo_general, sep=None, engine="python", encoding="utf-8-sig")
             else:
                 df_origen_g = pd.read_excel(archivo_general)
             df_norm_g = normalizar_general(df_origen_g, fecha_contexto)
