@@ -72,22 +72,52 @@ MESES_ES = {
 }
 
 
-def parsear_fecha_espanol(texto):
-    """Convierte 'sept 23, 2026' -> date(2026, 9, 23). Devuelve None si no matchea."""
+def parsear_fecha_espanol(texto, hoy=None):
+    """
+    Convierte fechas en español a date. Soporta dos formatos vistos en los exports:
+      - "sept 23, 2026" (mes dia, anio)
+      - "sep-24"         (mes-dia, SIN anio -> se infiere el anio actual;
+                           si la fecha resultante queda en el futuro, se asume el anio anterior)
+    Devuelve None si no matchea ningun formato conocido.
+    """
     if pd.isna(texto):
         return None
-    m = re.match(r"\s*([a-zA-Zé]+)\.?\s+(\d{1,2}),?\s+(\d{4})", str(texto).strip().lower())
-    if not m:
-        return None
-    mes_txt, dia, anio = m.groups()
+    if hoy is None:
+        hoy = date.today()
+    s = str(texto).strip().lower()
+
+    # Formato "sept 23, 2026" / "sep 23 2026"
+    m = re.match(r"^([a-zñ]+)\.?\s+(\d{1,2}),?\s+(\d{4})$", s)
+    if m:
+        mes_txt, dia, anio = m.groups()
+        mes = _mes_a_numero(mes_txt)
+        if mes:
+            try:
+                return date(int(anio), mes, int(dia))
+            except ValueError:
+                return None
+
+    # Formato "sep-24" (sin anio)
+    m2 = re.match(r"^([a-zñ]+)-(\d{1,2})$", s)
+    if m2:
+        mes_txt, dia = m2.groups()
+        mes = _mes_a_numero(mes_txt)
+        if mes:
+            try:
+                fecha = date(hoy.year, mes, int(dia))
+            except ValueError:
+                return None
+            # Si queda mas de 3 dias en el futuro respecto a hoy, probablemente es del anio anterior
+            if fecha > hoy + timedelta(days=3):
+                fecha = date(hoy.year - 1, mes, int(dia))
+            return fecha
+
+    return None
+
+
+def _mes_a_numero(mes_txt):
     mes_txt = mes_txt.replace(".", "")
-    mes = MESES_ES.get(mes_txt[:4]) or MESES_ES.get(mes_txt[:3])
-    if mes is None:
-        return None
-    try:
-        return date(int(anio), mes, int(dia))
-    except ValueError:
-        return None
+    return MESES_ES.get(mes_txt[:4]) or MESES_ES.get(mes_txt[:3])
 
 
 # ============================================================
