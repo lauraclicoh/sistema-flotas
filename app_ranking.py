@@ -179,8 +179,54 @@ def limpiar_nombres_columnas(df):
     return df
 
 
+ESTADOS_HR_VALIDOS = {"abierto", "cerrado", "tomado"}
+
+
+def corregir_columnas_corridas_diario(df):
+    """
+    Algunos exports (ej. 'Servicio - Operaciones Latam') traen el encabezado
+    desalineado: falta la columna 'Anio' que aparece cuando la fecha de
+    Creacion se separa en dos campos al exportar. Esto corre TODAS las
+    columnas siguientes una posicion (ej. 'Ciudad' termina mostrando el
+    barrio en vez de la ciudad real).
+
+    Se detecta revisando si la columna 'identificacion' contiene valores de
+    Estado HR (Abierto/Cerrado/Tomado) en vez de numeros de cedula -> si es
+    asi, se corrige el corrimiento insertando una columna 'Anio_export' y
+    reacomodando las demas a su posicion correcta.
+    """
+    if "identificacion" not in df.columns or "Creacion" not in df.columns:
+        return df, False
+
+    muestra = df["identificacion"].astype(str).str.strip().str.lower()
+    if muestra.empty:
+        return df, False
+    proporcion_estado = muestra.isin(ESTADOS_HR_VALIDOS).mean()
+
+    if proporcion_estado <= 0.5:
+        return df, False
+
+    cols = list(df.columns)
+    idx_creacion = cols.index("Creacion")
+    nuevas_cols = cols[: idx_creacion + 1] + ["Anio_export"] + cols[idx_creacion + 1 : -1]
+
+    if len(nuevas_cols) != len(cols):
+        return df, False
+
+    df_corregido = df.copy()
+    df_corregido.columns = nuevas_cols
+    return df_corregido, True
+
+
 def normalizar_diario(df_origen):
     df_origen = limpiar_nombres_columnas(df_origen)
+    df_origen, se_corrigio = corregir_columnas_corridas_diario(df_origen)
+    if se_corrigio:
+        st.info(
+            "⚠️ Este archivo traía las columnas desalineadas (bug conocido de cierto export) "
+            "y se corrigió automáticamente antes de procesarlo."
+        )
+
     faltantes = [c for c in MAPEO_DIARIO if c not in df_origen.columns]
     if faltantes:
         raise ValueError(f"Al archivo Diario le faltan columnas: {faltantes}")
@@ -423,31 +469,50 @@ with tab_ranking:
         st.info("Carga primero el archivo Diario en la pestaña anterior.")
     else:
         fecha_max = df_rutas["Fecha"].max()
-        fecha_min_default = fecha_max - timedelta(days=DIAS_RANGO_DEFAULT)
+        fecha_min_datos = df_rutas["Fecha"].min()
 
-        c1, c2, c3, c4 = st.columns([1, 1, 1, 1])
-        with c1:
-            fecha_ini = st.date_input("Desde", value=max(fecha_min_default, df_rutas["Fecha"].min()))
-        with c2:
-            fecha_fin = st.date_input("Hasta", value=fecha_max)
+        st.markdown("#### 🗓️ Periodo")
+        opcion_periodo = st.selectbox(
+            "Selecciona el periodo a evaluar",
+            ["Hoy", "Ayer", "Última semana (7 días)", "Último mes (30 días)", "Últimos 60 días", "Rango personalizado"],
+            help=f"'Hoy' toma como referencia la fecha más reciente cargada ({fecha_max}), no necesariamente la fecha del calendario.",
+        )
+
+        if opcion_periodo == "Hoy":
+            fecha_ini, fecha_fin = fecha_max, fecha_max
+        elif opcion_periodo == "Ayer":
+            fecha_ini = fecha_fin = fecha_max - timedelta(days=1)
+        elif opcion_periodo == "Última semana (7 días)":
+            fecha_ini, fecha_fin = fecha_max - timedelta(days=6), fecha_max
+        elif opcion_periodo == "Último mes (30 días)":
+            fecha_ini, fecha_fin = fecha_max - timedelta(days=29), fecha_max
+        elif opcion_periodo == "Últimos 60 días":
+            fecha_ini, fecha_fin = fecha_max - timedelta(days=59), fecha_max
+        else:
+            cP1, cP2 = st.columns(2)
+            with cP1:
+                fecha_ini = st.date_input("Desde", value=max(fecha_max - timedelta(days=DIAS_RANGO_DEFAULT), fecha_min_datos))
+            with cP2:
+                fecha_fin = st.date_input("Hasta", value=fecha_max)
+
+        fecha_ini = max(fecha_ini, fecha_min_datos)
+        st.caption(f"Evaluando del **{fecha_ini}** al **{fecha_fin}**.")
+
+        c3, c4 = st.columns(2)
         with c3:
-            umbral_rutas = st.slider("Rutas mínimas en el rango", 0, 100, UMBRAL_RUTAS_DEFAULT)
+            umbral_rutas = st.slider("Rutas mínimas en el periodo", 0, 100, UMBRAL_RUTAS_DEFAULT)
         with c4:
             n_top = st.selectbox("Tamaño Top/Bottom", [5, 10, 15, 20], index=1)
 
-        categorias_sel = st.multiselect("Filtrar por categoría", CATEGORIAS_ORDEN)
-        ciudades_todas = sorted(df_rutas["Ciudad"].dropna().unique())
-        ciudades_sel = st.multiselect("Filtrar por ciudad (vacío = todas)", ciudades_todas)
-
-        df_rank = calcular_ranking(df_rutas, df_contexto, fecha_ini, fecha_fin, umbral_rutas, categorias_sel, ciudades_sel)
+        df_rank = calcular_ranking(df_rutas, df_contexto, fecha_ini, fecha_fin, umbral_rutas, [], [])
 
         if df_rank.empty:
-            st.warning("No hay aliados que cumplan estos filtros en el rango de fechas elegido.")
+            st.warning("No hay aliados con rutas realizadas en este periodo con el umbral elegido.")
         else:
             k1, k2, k3, k4 = st.columns(4)
-            k1.metric("Aliados en ranking", len(df_rank))
+            k1.metric("Aliados con rutas realizadas", len(df_rank))
             k2.metric("% Gestión promedio", f"{df_rank['Pct_Gestion'].mean()*100:.1f}%")
-            k3.metric("Total rutas en el rango", int(df_rank["Rutas_en_rango"].sum()))
+            k3.metric("Total rutas en el periodo", int(df_rank["Rutas_en_rango"].sum()))
             k4.metric(
                 "Aliados activos (60 días)",
                 int((df_rank["Ultima_fecha"] >= (fecha_max - timedelta(days=60))).sum()),
@@ -468,9 +533,10 @@ with tab_ranking:
                 st.markdown(f"**Bottom {n_top}**")
                 st.dataframe(formatear_tabla(bottom_nac, cols_mostrar), use_container_width=True, hide_index=True)
 
+            # ---------------- POR CIUDAD ----------------
             st.divider()
-            st.markdown("### 🏙️ Top / Bottom por ciudad")
-            ciudad_focus = st.selectbox("Ciudad", sorted(df_rank["Ciudad"].dropna().unique()))
+            st.markdown("### 🏙️ Ranking por ciudad")
+            ciudad_focus = st.selectbox("Ciudad", sorted(df_rank["Ciudad"].dropna().unique()), key="ciudad_focus")
             top_c, bottom_c = top_bottom(df_rank, n=n_top, por_ciudad=ciudad_focus)
             colC, colD = st.columns(2)
             with colC:
@@ -480,12 +546,42 @@ with tab_ranking:
                 st.markdown(f"**Bottom {n_top} en {ciudad_focus}**")
                 st.dataframe(formatear_tabla(bottom_c, cols_mostrar), use_container_width=True, hide_index=True)
 
+            with st.expander(f"📋 Ver lista completa de {ciudad_focus} (todos los aliados, ordenados)"):
+                lista_ciudad = df_rank[df_rank["Ciudad"] == ciudad_focus].sort_values("Pct_Gestion", ascending=False)
+                lista_ciudad_fmt = formatear_tabla(lista_ciudad, cols_mostrar)
+                lista_ciudad_fmt.insert(0, "Puesto", range(1, len(lista_ciudad_fmt) + 1))
+                st.dataframe(lista_ciudad_fmt, use_container_width=True, hide_index=True)
+
+            # ---------------- POR CATEGORIA ----------------
             st.divider()
-            with st.expander("📋 Ver base completa del rango filtrado"):
-                st.dataframe(formatear_tabla(df_rank.sort_values("Pct_Gestion", ascending=False), cols_mostrar),
-                             use_container_width=True, hide_index=True)
+            st.markdown("### 🏷️ Ranking por categoría")
+            categoria_focus = st.selectbox(
+                "Categoría", sorted(df_rank["Categoria"].dropna().unique(), key=lambda c: CATEGORIAS_ORDEN.index(c) if c in CATEGORIAS_ORDEN else 99),
+                key="categoria_focus",
+            )
+            df_cat = df_rank[df_rank["Categoria"] == categoria_focus].sort_values("Pct_Gestion", ascending=False)
+            top_cat, bottom_cat = df_cat.head(n_top), df_cat.tail(n_top).sort_values("Pct_Gestion", ascending=True)
+            colE, colF = st.columns(2)
+            with colE:
+                st.markdown(f"**Top {n_top} en categoría {categoria_focus}**")
+                st.dataframe(formatear_tabla(top_cat, cols_mostrar), use_container_width=True, hide_index=True)
+            with colF:
+                st.markdown(f"**Bottom {n_top} en categoría {categoria_focus}**")
+                st.dataframe(formatear_tabla(bottom_cat, cols_mostrar), use_container_width=True, hide_index=True)
+
+            with st.expander(f"📋 Ver lista completa de la categoría {categoria_focus} (todos los aliados, ordenados)"):
+                lista_cat_fmt = formatear_tabla(df_cat, cols_mostrar)
+                lista_cat_fmt.insert(0, "Puesto", range(1, len(lista_cat_fmt) + 1))
+                st.dataframe(lista_cat_fmt, use_container_width=True, hide_index=True)
+
+            # ---------------- LISTA COMPLETA GENERAL ----------------
+            st.divider()
+            with st.expander("📋 Ver TODA la base del periodo, ordenada por ciudad"):
+                lista_todas = df_rank.sort_values(["Ciudad", "Pct_Gestion"], ascending=[True, False])
+                st.dataframe(formatear_tabla(lista_todas, cols_mostrar), use_container_width=True, hide_index=True)
                 csv = df_rank.to_csv(index=False, sep=";").encode("utf-8")
                 st.download_button("Descargar esta vista como CSV", csv, "ranking_filtrado.csv", "text/csv")
+
 
 
 # ---------------------------------------------------------------
