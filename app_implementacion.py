@@ -547,6 +547,24 @@ def _ir_a_aliado(cedula):
     st.session_state["buscar_planeacion"] = str(cedula)
 
 
+def _mapa_ciudades():
+    """
+    cédula normalizada -> ciudad corta. La ciudad no vive en PLANEACION_ALIADOS (ahí solo hay 'zona'),
+    así que se toma de las hojas de ruta de Looker (CARGUES_REALES) y de COORDINADOR_ALIADOS;
+    si el aliado no está en ninguna, la base usa la zona como respaldo.
+    """
+    cargues = _get_roster("cargues_roster", HOJA_CARGUES, COLS_CARGUES_REALES)
+    coord = _get_roster("coord_roster", "COORDINADOR_ALIADOS", COLS_COORDINADOR)
+    mapa = {}
+    for ids, ciudades in ((cargues.cedula, cargues.ciudad), (coord.documento, coord.ciudad)):
+        for i, c in zip(ids, ciudades):
+            k = _normalizar_tel(i)
+            v = _ciudad_corta(c)
+            if k and v != "Sin ciudad":
+                mapa[k] = v
+    return mapa
+
+
 def procesar_gestion_requerimiento(fila, resultado, estado_final, razon, nota):
     hoy = now_col().date()
     intentos_llamada = a_entero(fila.get("intentos_llamada")) + 1
@@ -1487,6 +1505,9 @@ if perfil == "Analista":
             base = df_plan.copy()
             base["situacion"] = clasificar_planeacion(base)
             base["intentos_llamada"] = base.intentos_llamada.apply(a_entero)
+            mapa_ciudad = _mapa_ciudades()
+            base["ciudad"] = base.identificacion.map(lambda i: mapa_ciudad.get(_normalizar_tel(i)))
+            base["ciudad"] = base.ciudad.fillna(base.zona.map(_ciudad_corta))
             hoy_d = now_col().date()
             ult = pd.to_datetime(base.ultima_gestion, errors="coerce")
 
@@ -1505,8 +1526,8 @@ if perfil == "Analista":
             situaciones_sel = f1c.multiselect("Situación", SITUACIONES, default=["📞 Por gestionar hoy"], key="base_sit")
             an_opc = ["Todos", "Solo los míos", "Sin asignar"] + [a for a in NOMBRES_ANALISTAS if a != nombre]
             an_sel_b = f2c.selectbox("Analista asignado", an_opc, key="base_an")
-            zonas = ["Todas"] + sorted([z for z in base.zona.unique() if z])
-            zona_sel = f3c.selectbox("Zona", zonas, key="base_zona")
+            ciudades = ["Todas"] + sorted([c for c in base.ciudad.unique() if c])
+            ciudad_sel = f3c.selectbox("Ciudad", ciudades, key="base_ciudad")
             texto_b = st.text_input("Filtrar por nombre, cédula o celular", key="base_txt")
 
             vista = base
@@ -1518,8 +1539,8 @@ if perfil == "Analista":
                 vista = vista[vista.analista.str.strip() == ""]
             elif an_sel_b != "Todos":
                 vista = vista[vista.analista == an_sel_b]
-            if zona_sel != "Todas":
-                vista = vista[vista.zona == zona_sel]
+            if ciudad_sel != "Todas":
+                vista = vista[vista.ciudad == ciudad_sel]
             if texto_b.strip():
                 t = texto_b.strip().lower()
                 t_num = _normalizar_tel(texto_b)
@@ -1533,7 +1554,7 @@ if perfil == "Analista":
                          .sort_values(["_prox", "intentos_llamada"], na_position="first") \
                          .reset_index(drop=True)
 
-            cols_vista = ["situacion", "identificacion", "nombre", "celular", "zona", "vehiculo", "analista",
+            cols_vista = ["situacion", "identificacion", "nombre", "celular", "ciudad", "zona", "vehiculo", "analista",
                           "estado_planeacion", "categoria", "razon", "intentos_llamada", "intentos_sin_contacto",
                           "ultimo_resultado", "proxima_gestion", "ultima_gestion"]
             st.caption(f"{len(vista)} aliados en esta vista. Selecciona una fila para llevarla al buscador y gestionarla.")
