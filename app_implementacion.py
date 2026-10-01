@@ -3,7 +3,6 @@ from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import gspread
-import numpy as np
 import pandas as pd
 import plotly.express as px
 import streamlit as st
@@ -86,13 +85,13 @@ ESTADOS_FINALES_REQ = [
     "Aliado rechaza la oferta",
     "Carga en otra operación",
     "Interesado en carga / reserva",
-    "Pendiente confirmación",
+    "Pendiente confirmación"
     "Interesado esporádico, no fijo",
 ]
 RAZONES_REQ = [
     "—",
     "Interesado carga",
-    "Pendiente confirmación",
+    "Pendiente confirmación"
     "No le interesa / cuestiones personales",
     "No tiene vehículo / vehículo dañado",
     "Peso / volumen / recorrido",
@@ -514,55 +513,6 @@ def procesar_validacion_planeacion(fila, cargo, nota):
         "proxima_gestion": cambios.get("proxima_gestion", ""), "observaciones": nota,
     }
     return cambios, log
-
-
-# -------------------------------------------------------------------------
-# Base completa de Planeación: situación de cada aliado
-# -------------------------------------------------------------------------
-SITUACIONES = ["📞 Por gestionar hoy", "📅 Programado", "⏸️ Pausado", "🚫 Bloqueado", "✅ Completado"]
-
-
-def clasificar_planeacion(df):
-    """
-    Una sola situación por aliado, en este orden de prioridad:
-    Bloqueado > Completado > Por gestionar hoy (sin fecha o fecha <= hoy) > Pausado > Programado.
-    Un aliado pausado cuya pausa ya venció pasa solo a 'Por gestionar hoy'.
-    """
-    hoy = pd.Timestamp(now_col().date())
-    prox = pd.to_datetime(df.proxima_gestion, errors="coerce")
-    bloq = df.bloqueado.apply(es_verdadero)
-    completado = df.estado_planeacion == "Completado"
-    vence = prox.isna() | (prox <= hoy)
-    situacion = np.select(
-        [bloq, completado, vence, df.estado_planeacion == "Pausado"],
-        ["🚫 Bloqueado", "✅ Completado", "📞 Por gestionar hoy", "⏸️ Pausado"],
-        default="📅 Programado",
-    )
-    return pd.Series(situacion, index=df.index)
-
-
-def _ir_a_aliado(cedula):
-    """Callback: manda al aliado seleccionado al buscador de arriba para gestionarlo."""
-    st.session_state["modo_busq_plan"] = "Cédula"
-    st.session_state["buscar_planeacion"] = str(cedula)
-
-
-def _mapa_ciudades():
-    """
-    cédula normalizada -> ciudad corta. La ciudad no vive en PLANEACION_ALIADOS (ahí solo hay 'zona'),
-    así que se toma de las hojas de ruta de Looker (CARGUES_REALES) y de COORDINADOR_ALIADOS;
-    si el aliado no está en ninguna, la base usa la zona como respaldo.
-    """
-    cargues = _get_roster("cargues_roster", HOJA_CARGUES, COLS_CARGUES_REALES)
-    coord = _get_roster("coord_roster", "COORDINADOR_ALIADOS", COLS_COORDINADOR)
-    mapa = {}
-    for ids, ciudades in ((cargues.cedula, cargues.ciudad), (coord.documento, coord.ciudad)):
-        for i, c in zip(ids, ciudades):
-            k = _normalizar_tel(i)
-            v = _ciudad_corta(c)
-            if k and v != "Sin ciudad":
-                mapa[k] = v
-    return mapa
 
 
 def procesar_gestion_requerimiento(fila, resultado, estado_final, razon, nota):
@@ -1454,8 +1404,7 @@ if perfil == "Analista":
                         nota = st.text_area("Observación", key="nota_validacion_plan")
                         enviar = st.form_submit_button("Guardar validación")
                     if enviar:
-                        fila_ctx = dict(fila); fila_ctx["analista"] = nombre
-                        cambios, log = procesar_validacion_planeacion(fila_ctx, cargo == "Sí", nota)
+                        cambios, log = procesar_validacion_planeacion(fila, cargo == "Sí", nota)
                         actualizar_fila_por_id("PLANEACION_ALIADOS", "identificacion", fila.identificacion, cambios)
                         _actualizar_roster_local("plan_roster", "identificacion", fila.identificacion, cambios)
                         agregar_filas("PLANEACION_GESTIONES", [[_safe_str(log.get(c, "")) for c in COLS_PLANEACION_GESTIONES]])
@@ -1489,88 +1438,14 @@ if perfil == "Analista":
                             st.success("Guardado.")
                             st.rerun()
 
-        # --------------------------------------------------------------
-        # BASE COMPLETA DE ALIADOS: por gestionar / pausados / bloqueados
-        # --------------------------------------------------------------
-        st.markdown("---")
-        st.markdown("### 📋 Base completa de aliados")
-        if st.button("🔄 Actualizar base", key="btn_ref_base_plan"):
-            _invalidar_roster("plan_roster")
-            st.rerun()
-
+        st.markdown("### 📋 Pendientes de gestión")
         df_plan = _get_roster("plan_roster", "PLANEACION_ALIADOS", COLS_PLANEACION)
-        if df_plan.empty:
-            st.info("Coordinación todavía no ha cargado la base de Planeación.")
-        else:
-            base = df_plan.copy()
-            base["situacion"] = clasificar_planeacion(base)
-            base["intentos_llamada"] = base.intentos_llamada.apply(a_entero)
-            mapa_ciudad = _mapa_ciudades()
-            base["ciudad"] = base.identificacion.map(lambda i: mapa_ciudad.get(_normalizar_tel(i)))
-            base["ciudad"] = base.ciudad.fillna(base.zona.map(_ciudad_corta))
-            hoy_d = now_col().date()
-            ult = pd.to_datetime(base.ultima_gestion, errors="coerce")
-
-            # ---- KPIs
-            por_gestionar = base[base.situacion == "📞 Por gestionar hoy"]
-            k1, k2, k3, k4, k5, k6 = st.columns(6)
-            k1.metric("Total base", len(base))
-            k2.metric("📞 Faltan por gestionar hoy", len(por_gestionar))
-            k3.metric("🆕 Nunca gestionados", int((por_gestionar.intentos_llamada == 0).sum()))
-            k4.metric("✅ Gestionados hoy", int((ult.dt.date == hoy_d).sum()))
-            k5.metric("⏸️ Pausados", int((base.situacion == "⏸️ Pausado").sum()))
-            k6.metric("🚫 Bloqueados", int((base.situacion == "🚫 Bloqueado").sum()))
-
-            # ---- Filtros
-            f1c, f2c, f3c = st.columns([2, 1.3, 1.3])
-            situaciones_sel = f1c.multiselect("Situación", SITUACIONES, default=["📞 Por gestionar hoy"], key="base_sit")
-            an_opc = ["Todos", "Solo los míos", "Sin asignar"] + [a for a in NOMBRES_ANALISTAS if a != nombre]
-            an_sel_b = f2c.selectbox("Analista asignado", an_opc, key="base_an")
-            ciudades = ["Todas"] + sorted([c for c in base.ciudad.unique() if c])
-            ciudad_sel = f3c.selectbox("Ciudad", ciudades, key="base_ciudad")
-            texto_b = st.text_input("Filtrar por nombre, cédula o celular", key="base_txt")
-
-            vista = base
-            if situaciones_sel:
-                vista = vista[vista.situacion.isin(situaciones_sel)]
-            if an_sel_b == "Solo los míos":
-                vista = vista[vista.analista == nombre]
-            elif an_sel_b == "Sin asignar":
-                vista = vista[vista.analista.str.strip() == ""]
-            elif an_sel_b != "Todos":
-                vista = vista[vista.analista == an_sel_b]
-            if ciudad_sel != "Todas":
-                vista = vista[vista.ciudad == ciudad_sel]
-            if texto_b.strip():
-                t = texto_b.strip().lower()
-                t_num = _normalizar_tel(texto_b)
-                m = vista.nombre.str.lower().str.contains(t, regex=False)
-                if t_num:
-                    m = m | vista.identificacion.apply(_normalizar_tel).str.contains(t_num, regex=False) \
-                          | vista.celular.apply(_normalizar_tel).str.contains(t_num, regex=False)
-                vista = vista[m]
-
-            vista = vista.assign(_prox=pd.to_datetime(vista.proxima_gestion, errors="coerce")) \
-                         .sort_values(["_prox", "intentos_llamada"], na_position="first") \
-                         .reset_index(drop=True)
-
-            cols_vista = ["situacion", "identificacion", "nombre", "celular", "ciudad", "zona", "vehiculo", "analista",
-                          "estado_planeacion", "categoria", "razon", "intentos_llamada", "intentos_sin_contacto",
-                          "ultimo_resultado", "proxima_gestion", "ultima_gestion"]
-            st.caption(f"{len(vista)} aliados en esta vista. Selecciona una fila para llevarla al buscador y gestionarla.")
-            evento = st.dataframe(
-                vista[cols_vista], hide_index=True, use_container_width=True,
-                on_select="rerun", selection_mode="single-row", key="tabla_base_plan",
+        if not df_plan.empty:
+            vista = df_plan[~df_plan.bloqueado.apply(es_verdadero)]
+            st.dataframe(
+                vista[["identificacion", "nombre", "celular", "zona", "analista", "estado_planeacion", "categoria", "intentos_llamada", "proxima_gestion"]],
+                hide_index=True, use_container_width=True,
             )
-            filas_sel = evento.selection.rows if evento is not None else []
-            if filas_sel:
-                elegida = vista.iloc[filas_sel[0]]
-                st.button(f"➡️ Gestionar a {elegida.nombre} ({elegida.identificacion})",
-                          on_click=_ir_a_aliado, args=(elegida.identificacion,), key="btn_ir_aliado")
-                st.caption("Sube al buscador de arriba: ya queda cargado con esa cédula.")
-
-            st.download_button("📥 Descargar esta vista (CSV)", vista[cols_vista].to_csv(index=False).encode("utf-8-sig"),
-                               f"base_aliados_{hoy_d}.csv", "text/csv")
 
     # ------------------------------------------------------------------
     # REQUERIMIENTOS SUPPLY
