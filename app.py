@@ -5,7 +5,6 @@ import gspread
 from google.oauth2.service_account import Credentials
 import plotly.express as px
 import time
-  from tablero import render_tablero
 import re
 import unicodedata
 from zoneinfo import ZoneInfo
