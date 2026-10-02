@@ -1,15 +1,3 @@
-"""
-tablero.py — Tablero simple de Gestión Aliados Programación.
-
-Uso en app.py (perfil Coordinador):
-
-    from tablero import render_tablero
-    ...
-    with tab0:
-        render_tablero(base, hist, _get_cargues(), on_refresh=_refrescar_tablero)
-
-Fuentes: BASE (base), HISTORICO (hist) y CARGUES_REALES (cargues).
-"""
 import unicodedata
 
 import pandas as pd
