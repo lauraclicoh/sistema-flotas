@@ -1,3 +1,15 @@
+"""
+tablero.py — Tablero simple de Gestión Aliados Programación.
+
+Uso en app.py (perfil Coordinador):
+
+    from tablero import render_tablero
+    ...
+    with tab0:
+        render_tablero(base, hist, _get_cargues(), on_refresh=_refrescar_tablero)
+
+Fuentes: BASE (base), HISTORICO (hist) y CARGUES_REALES (cargues).
+"""
 import unicodedata
 
 import pandas as pd
@@ -12,27 +24,32 @@ ESTADOS_FINALES = [
     "Empleado",
     "Point",
 ]
-ALIAS_ID = ["identificacion", "cedula", "id_aliado", "documento", "id"]
+RAZONES_INTERES = ["Interesado carga hoy/ reserva"]   # igual que RAZONES_VALIDACION de app.py
+ESTADOS_HR_CARGUE = {"abierto", "cerrado"}            # igual que app.py: solo HR que sí salieron
+CIUDADES_CON_TILDE = {"bogota": "Bogotá", "medellin": "Medellín", "ibague": "Ibagué"}
 
 
 # ---------- utilidades ----------
 def _key(x):
     s = unicodedata.normalize("NFKD", str(x)).encode("ascii", "ignore").decode().lower().strip()
+    if s.startswith("zona "):
+        s = s[5:].strip()
     return "bogota" if s.startswith("bogota") else s
 
 
 def _label(x):
-    return "Bogotá" if _key(x) == "bogota" else str(x).strip().title()
+    k = _key(x)
+    return CIUDADES_CON_TILDE.get(k, k.title()) if k else "Sin zona"
 
 
 def _pct(n, d):
     return round(n / d * 100, 1) if d else 0.0
 
 
-def _norm_cols(df):
-    df = df.copy()
-    df.columns = df.columns.astype(str).str.strip().str.lower().str.replace(r"\s+", "_", regex=True)
-    return df
+def _nid(valor):
+    """Cédula como texto sin '.0' (para cruzar BASE, HISTORICO y CARGUES_REALES)."""
+    v = str(valor).strip()
+    return v[:-2] if v.endswith(".0") else v
 
 
 def _card(col, label, value, caption=""):
@@ -42,38 +59,38 @@ def _card(col, label, value, caption=""):
             st.caption(caption or " ")
 
 
+def _es_interesado(df):
+    return df["estado"].fillna("").str.startswith("Interesado llega") | df["razon"].fillna("").isin(RAZONES_INTERES)
+
+
 def _ultimo_cargue(cargues):
-    """Devuelve {cédula: fecha del último cargue} o None si no se reconoce la hoja."""
-    if cargues is None or cargues.empty:
+    """{cédula: fecha de su último cargue real} usando solo HR Abierta/Cerrada."""
+    if cargues is None or len(cargues) == 0:
         return {}
-    c = _norm_cols(cargues)
-    col_id = next((k for k in ALIAS_ID if k in c.columns), None)
-    if col_id is None:
+    c = cargues.copy()
+    c.columns = c.columns.astype(str).str.strip().str.lower()
+    if "cedula" not in c.columns or "fecha_cargue" not in c.columns:
         return None
-    c["_id"] = c[col_id].astype(str).str.strip()
-    col_f = next((k for k in c.columns if "fecha" in k), None)
-    if col_f is None:  # sin fecha: basta con que haya cargado alguna vez
-        return {i: pd.Timestamp("2100-01-01") for i in c["_id"].unique()}
-    c["_f"] = pd.to_datetime(c[col_f], errors="coerce")
+    c["_id"] = c["cedula"].map(_nid)
+    c["_f"] = pd.to_datetime(c["fecha_cargue"], errors="coerce")
+    if "estado_hr" in c.columns:
+        est = c["estado_hr"].astype(str).str.strip().str.lower()
+        c = c[est.isin(ESTADOS_HR_CARGUE) | (est == "")]
     return c.dropna(subset=["_f"]).groupby("_id")["_f"].max().to_dict()
 
 
 # ---------- tablero ----------
-def render_tablero(base, hist, leer_hoja):
+def render_tablero(base, hist, cargues, on_refresh=None):
     st.subheader("🚚 Gestión Aliados Programación")
 
     if base is None or len(base) == 0:
         st.warning("Carga la base primero.")
         return
 
-    if "cargues_df" not in st.session_state:
-        st.session_state["cargues_df"] = leer_hoja("CARGUES_REALES")
-    ult_cargue = _ultimo_cargue(st.session_state["cargues_df"])
-
     base = base.copy()
-    base["identificacion"] = base["identificacion"].astype(str).str.strip()
+    base["identificacion"] = base["identificacion"].map(_nid)
     base = base.drop_duplicates("identificacion")
-    col_ciudad = "municipio" if "municipio" in base.columns else "zona"
+    col_ciudad = "zona" if "zona" in base.columns else "municipio"
     base["_k"] = base[col_ciudad].map(_key)
     etiquetas = {}
     for k, v in zip(base["_k"], base[col_ciudad]):
@@ -86,22 +103,23 @@ def render_tablero(base, hist, leer_hoja):
         "Periodo de gestión",
         ["Todo el histórico", "Hoy", "Últimos 7 días", "Últimos 30 días", "Este mes"],
     )
-    if f3.button("🔄 Actualizar", use_container_width=True):
-        st.session_state.pop("cargues_df", None)
-        st.session_state["base_stale"] = True
-        st.session_state["hist_last_load"] = 0
+    f3.markdown("<div style='height:1.8rem'></div>", unsafe_allow_html=True)
+    if on_refresh is not None and f3.button("🔄 Actualizar", use_container_width=True):
+        on_refresh()
         st.rerun()
 
     if ciudad != "Todas":
         k_sel = next(k for k, v in etiquetas.items() if v == ciudad)
         base = base[base["_k"] == k_sel]
 
+    ahora = pd.Timestamp.now(tz="America/Bogota").tz_localize(None)
+
     # historial filtrado por ciudad y periodo
     h = hist.copy() if hist is not None else pd.DataFrame()
     if not h.empty:
-        h["identificacion"] = h["identificacion"].astype(str).str.strip()
+        h["identificacion"] = h["identificacion"].map(_nid)
         h = h[h["identificacion"].isin(base["identificacion"])]
-        hoy = pd.Timestamp.now(tz="America/Bogota").tz_localize(None).normalize()
+        hoy = ahora.normalize()
         desde = {
             "Hoy": hoy,
             "Últimos 7 días": hoy - pd.Timedelta(days=6),
@@ -115,7 +133,7 @@ def render_tablero(base, hist, leer_hoja):
     prox = base["proxima_gestion"].astype(str).str.strip() if "proxima_gestion" in base.columns \
         else pd.Series("", index=base.index)
     bloq = prox.str.upper() == "NO_VOLVER"
-    fut = pd.to_datetime(prox, errors="coerce") > pd.Timestamp.now(tz="America/Bogota").tz_localize(None)
+    fut = pd.to_datetime(prox, errors="coerce") > ahora
     estado = base["estado_aliado"].astype(str) if "estado_aliado" in base.columns \
         else pd.Series("", index=base.index)
     activos = int((~estado.str.contains("Inactivo")).sum())
@@ -135,9 +153,8 @@ def render_tablero(base, hist, leer_hoja):
     llamados = len(ult)
     no_resp = int(ult["resultado"].isin(NO_RESPONDEN).sum())
     gestionados = int((ult["resultado"] == "Sí contestó").sum())
-    est = ult["estado"].fillna("")
-    interesados = int(est.str.startswith("Interesado llega").sum())
-    rechazados = int((est == "Aliado Rechaza la oferta").sum())
+    interesados = int(_es_interesado(ult).sum())
+    rechazados = int((ult["estado"].fillna("") == "Aliado Rechaza la oferta").sum())
 
     st.markdown("##### Embudo de gestión")
     c = st.columns(5)
@@ -149,26 +166,22 @@ def render_tablero(base, hist, leer_hoja):
 
     # --- 3. por analista ---
     st.markdown("##### Gestión por analista")
+    ult_cargue = _ultimo_cargue(cargues)
     if ult_cargue is None:
-        st.caption("⚠️ No encontré la columna de cédula en CARGUES_REALES; 'Cargaron' aparece en 0.")
+        st.caption("⚠️ CARGUES_REALES no trae las columnas cedula y fecha_cargue; 'Cargaron' aparece en 0.")
         ult_cargue = {}
     filas = []
     for analista, x in h.groupby("analista"):
-        inter = (
-            x[x["estado"].fillna("").str.startswith("Interesado llega")]
-            .sort_values("fecha")
-            .drop_duplicates("identificacion")
-        )
+        inter = x[_es_interesado(x)].sort_values("fecha").drop_duplicates("identificacion")
         cargaron = sum(
             1
             for i, f in zip(inter["identificacion"], inter["fecha"])
-            if ult_cargue.get(i) is not None and ult_cargue[i] >= f.normalize()
+            if i in ult_cargue and ult_cargue[i] >= f.normalize() + pd.Timedelta(days=1)
         )
-        contactos = int((x["resultado"] == "Sí contestó").sum())
         filas.append({
             "Analista": analista,
             "Llamados": len(x),
-            "Contactos": contactos,
+            "Contactos": int((x["resultado"] == "Sí contestó").sum()),
             "Interesados": len(inter),
             "Cargaron": cargaron,
             "% cargue": _pct(cargaron, len(inter)),
@@ -185,11 +198,10 @@ def render_tablero(base, hist, leer_hoja):
     st.markdown("##### Estado final (sobre contactados)")
     contactados = ult[ult["resultado"] == "Sí contestó"]
     n_cont = len(contactados)
-    tabla = [
-        {"Estado final": e, "N°": int((contactados["estado"] == e).sum()),
-         "%": _pct(int((contactados["estado"] == e).sum()), n_cont)}
-        for e in ESTADOS_FINALES
-    ]
+    tabla = []
+    for e in ESTADOS_FINALES:
+        n = int((contactados["estado"].fillna("").str.strip() == e).sum())
+        tabla.append({"Estado final": e, "N°": n, "%": _pct(n, n_cont)})
     st.dataframe(
         pd.DataFrame(tabla),
         hide_index=True,
