@@ -8,6 +8,7 @@ import time
 import re
 import unicodedata
 from zoneinfo import ZoneInfo
+from tablero import render_tablero
 st.set_page_config(layout="wide", page_title="🚚 Gestión Aliados Programación", page_icon="🚚")
 TZ_COL = ZoneInfo("America/Bogota")
 def now_col():
@@ -703,6 +704,12 @@ def _get_cargues(forzar=False):
 def _invalidar_cargues():
     st.session_state["cargues_stale"] = True
 
+def _refrescar_tablero():
+    """Botón 🔄 del tablero: vuelve a leer BASE, HISTORICO y CARGUES_REALES desde Sheets."""
+    _invalidar_base()
+    _invalidar_cargues()
+    _get_hist(force_reload=True)
+
 def cargar_incremental_cargues(archivo):
     """
     Suma a CARGUES_REALES la exportación de Looker tal como sale del tablero.
@@ -932,11 +939,14 @@ with st.sidebar:
 if perfil == "Coordinador":
     base = _get_base()
     hist = _get_hist()
-    tab1,tab2,tab3,tab4,tab5,tab6,tab7,tab8,tab9 = st.tabs([
+    tab0,tab1,tab2,tab3,tab4,tab5,tab6,tab7,tab8,tab9 = st.tabs([
+        "📈 Tablero",
         "📊 Hoy","📅 Histórico & KPIs","🔍 Buscar Aliado",
         "🔥 Estado CRM","📤 Cargar Base","🎯 Asignación","⚙️ Reglas","🗺️ Cobertura por Zona",
         "🚚 Cumplimiento de cargue",
     ])
+    with tab0:
+        render_tablero(base, hist, _get_cargues(), on_refresh=_refrescar_tablero)
     with tab1:
         st.subheader("Auditoría de Gestión")
         if st.button("🔄 Actualizar gestiones", key="btn_ref_hoy"):
