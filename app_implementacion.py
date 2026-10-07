@@ -129,11 +129,12 @@ ALIAS_COORDINADOR = {
 }
 
 # Alias de encabezados para las bases de Planeación y Requerimientos que sube el Coordinador.
+# OJO: "ciudad" se guarda en la columna "zona" (de ahí sale la ciudad de todos los informes).
 ALIAS_PLANEACION = {
     "identificacion": "identificacion", "identificación": "identificacion", "cedula": "identificacion",
     "cédula": "identificacion", "documento": "identificacion", "id": "identificacion",
     "nombre": "nombre", "celular": "celular", "telefono": "celular", "teléfono": "celular",
-    "zona": "zona", "hub": "zona", "municipio": "zona",
+    "zona": "zona", "hub": "zona", "municipio": "zona", "ciudad": "zona",
     "vehiculo": "vehiculo", "vehículo": "vehiculo", "analista": "analista",
     "area": "area_aliado", "área": "area_aliado", "area del aliado": "area_aliado", "área del aliado": "area_aliado",
 }
@@ -581,10 +582,13 @@ def cargar_incremental_planeacion(archivo):
     existe, solo se actualizan sus datos de contacto (nombre/celular/zona/
     vehiculo/analista) — el historial de gestión (intentos, categoría,
     próxima gestión, bloqueo) NUNCA se toca. Si es nuevo, entra con CRM limpio.
+    La columna 'Ciudad' del archivo se guarda en 'zona' (alias en ALIAS_PLANEACION).
     """
     df = _leer_archivo_subido(archivo)
     df.columns = [str(c).strip().lower() for c in df.columns]
     df = df.rename(columns={k: v for k, v in ALIAS_PLANEACION.items() if k in df.columns})
+    # Si el archivo trae a la vez 'Zona' y 'Ciudad', ambas quedan como 'zona': se conserva la primera.
+    df = df.loc[:, ~df.columns.duplicated()]
     if "identificacion" not in df.columns:
         st.error("El archivo no tiene columna de identificación (cédula/documento).")
         return 0, 0
@@ -1232,7 +1236,8 @@ if perfil == "Coordinador":
         st.caption("Todas las cargas son incrementales: si el aliado/requerimiento ya existe se actualizan sus datos de contacto, sin tocar el historial de gestión. Si es nuevo, se agrega.")
 
         with st.expander("📋 Base de Gestión de Aliados (Planeación)", expanded=True):
-            st.caption("Columnas esperadas: Identificación, Nombre, Celular, Zona, Vehículo, Analista (opcional).")
+            st.caption("Columnas esperadas: Documento/Identificación, Nombre, Celular, Ciudad (o Zona), Vehículo, Analista (opcional). "
+                       "La Ciudad se usa en todos los informes por ciudad.")
             archivo_plan = st.file_uploader("Excel o CSV", type=["xlsx", "xls", "csv"], key="up_plan")
             if archivo_plan is not None and st.button("🚀 Cargar base de Planeación", key="btn_up_plan"):
                 try:
