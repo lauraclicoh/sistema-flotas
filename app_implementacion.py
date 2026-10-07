@@ -85,13 +85,13 @@ ESTADOS_FINALES_REQ = [
     "Aliado rechaza la oferta",
     "Carga en otra operación",
     "Interesado en carga / reserva",
-    "Pendiente confirmación"
+    "Pendiente confirmación",
     "Interesado esporádico, no fijo",
 ]
 RAZONES_REQ = [
     "—",
     "Interesado carga",
-    "Pendiente confirmación"
+    "Pendiente confirmación",
     "No le interesa / cuestiones personales",
     "No tiene vehículo / vehículo dañado",
     "Peso / volumen / recorrido",
@@ -968,6 +968,194 @@ def construir_cumplimiento(hist, cargues, aliados, analista, f1, f2):
 
 
 # =========================================================================
+# COLA DE GESTIÓN POR CIUDAD
+# Universo = PLANEACION_ALIADOS (+ COORDINADOR_ALIADOS para la ciudad y la sincronización)
+# =========================================================================
+SIT_VALIDAR = "✅ Validar cargue"
+SIT_NUNCA = "🆕 Nunca gestionado"
+SIT_SIN_CONTACTO = "📵 Sin contacto: recontactar"
+SIT_RECONTACTO = "🔁 Recontacto"
+SIT_ESPERA = "⏳ En espera (pausa)"
+SIT_COMPLETADO = "🏁 Completado"
+SIT_BLOQUEADO = "🚫 Bloqueado"
+SITUACIONES_PENDIENTES = [SIT_VALIDAR, SIT_NUNCA, SIT_SIN_CONTACTO, SIT_RECONTACTO]
+ORDEN_SITUACION = {s: i for i, s in enumerate(
+    SITUACIONES_PENDIENTES + [SIT_ESPERA, SIT_COMPLETADO, SIT_BLOQUEADO])}
+
+COLS_VISTA_COLA = ["identificacion", "nombre", "celular", "ciudad", "vehiculo", "situacion",
+                   "estado_planeacion", "ultimo_resultado", "intentos_llamada", "intentos_sin_contacto",
+                   "proxima_gestion", "ultima_gestion", "analista", "observaciones"]
+RENOMBRE_COLA = {"identificacion": "Cédula", "nombre": "Nombre", "celular": "Celular", "ciudad": "Ciudad",
+                 "vehiculo": "Vehículo", "situacion": "Situación", "estado_planeacion": "Estado",
+                 "ultimo_resultado": "Último resultado", "intentos_llamada": "Intentos",
+                 "intentos_sin_contacto": "Intentos sin contacto", "proxima_gestion": "Próxima gestión",
+                 "ultima_gestion": "Última gestión", "analista": "Analista", "observaciones": "Observaciones"}
+
+
+def _situacion(r, hoy):
+    """Aplica las reglas de recontacto/pausa/bloqueo sobre el estado ya guardado en el CRM."""
+    if r.bloq:
+        return SIT_BLOQUEADO
+    if r.estado_planeacion == "Completado":
+        return SIT_COMPLETADO
+    vence = pd.isna(r.prox) or r.prox.date() <= hoy      # ya toca (o nunca se programó)
+    if not vence:
+        return SIT_ESPERA                                  # pausas de 3/5/15 días aún vigentes
+    if not r.gestionado:
+        return SIT_NUNCA
+    if r.estado_planeacion == "Validación pendiente":
+        return SIT_VALIDAR
+    if r.ultimo_resultado in SIN_CONTACTO:
+        return SIT_SIN_CONTACTO
+    return SIT_RECONTACTO
+
+
+def construir_cola_planeacion(plan, coord, hist):
+    hoy = now_col().date()
+    d = plan.copy()
+    d["id_norm"] = d.identificacion.map(_normalizar_tel)
+    d = d[d.id_norm != ""].drop_duplicates("id_norm", keep="last")
+
+    # Ciudad: primero la de COORDINADOR_ALIADOS; si no existe, la zona de Planeación
+    ciudad_coord = {}
+    if coord is not None and not coord.empty:
+        cc = coord.assign(id_norm=coord.documento.map(_normalizar_tel))
+        cc = cc[(cc.id_norm != "") & (cc.ciudad.astype(str).str.strip() != "")]
+        ciudad_coord = dict(zip(cc.id_norm, cc.ciudad.map(_ciudad_corta)))
+    d["ciudad"] = [ciudad_coord.get(i) or _ciudad_corta(z) for i, z in zip(d.id_norm, d.zona)]
+
+    con_hist = set(hist.identificacion.map(_normalizar_tel)) if hist is not None and not hist.empty else set()
+    d["gestionado"] = (d.intentos_llamada.map(a_entero) > 0) | d.id_norm.isin(con_hist)
+    d["bloq"] = d.bloqueado.map(es_verdadero)
+    d["prox"] = pd.to_datetime(d.proxima_gestion, errors="coerce")
+    d["situacion"] = d.apply(lambda r: _situacion(r, hoy), axis=1)
+    d["pendiente_hoy"] = d.situacion.isin(SITUACIONES_PENDIENTES)
+    d["orden"] = d.situacion.map(ORDEN_SITUACION)
+    return d.sort_values(["orden", "prox"]).reset_index(drop=True)
+
+
+def resumen_por_ciudad(cola):
+    t = cola.assign(f_nunca=~cola.gestionado, f_espera=cola.situacion == SIT_ESPERA,
+                    f_bloq=cola.situacion == SIT_BLOQUEADO, f_comp=cola.situacion == SIT_COMPLETADO)
+    r = t.groupby("ciudad").agg(
+        Total=("id_norm", "size"), Gestionados=("gestionado", "sum"),
+        **{"Nunca gestionados": ("f_nunca", "sum"), "Pendientes hoy": ("pendiente_hoy", "sum"),
+           "En espera": ("f_espera", "sum"), "Bloqueados": ("f_bloq", "sum"), "Completados": ("f_comp", "sum")},
+    ).astype(int).reset_index().rename(columns={"ciudad": "Ciudad"})
+    r = r.sort_values("Pendientes hoy", ascending=False)
+    tot = pd.DataFrame([{"Ciudad": "TOTAL", **r.drop(columns="Ciudad").sum().to_dict()}])
+    r = pd.concat([r, tot], ignore_index=True)
+    r["% gestionado"] = (r.Gestionados / r.Total.where(r.Total > 0) * 100).round(1)
+    return r
+
+
+def aliados_por_sincronizar(coord, plan, estados_impl=None):
+    ya = set(plan.identificacion.map(_normalizar_tel))
+    c = coord.copy()
+    c["id_norm"] = c.documento.map(_normalizar_tel)
+    c = c[(c.id_norm != "") & ~c.id_norm.isin(ya)].drop_duplicates("id_norm")
+    if estados_impl:
+        c = c[c.estado_implementacion.isin(estados_impl)]
+    return c
+
+
+def sincronizar_coordinador_a_planeacion(estados_impl=None):
+    """Agrega a PLANEACION_ALIADOS (solo al final, sin reescribir la hoja) los aliados de COORDINADOR que no están."""
+    coord = _get_roster("coord_roster", "COORDINADOR_ALIADOS", COLS_COORDINADOR, forzar=True)
+    plan = _get_roster("plan_roster", "PLANEACION_ALIADOS", COLS_PLANEACION, forzar=True)
+    faltan = aliados_por_sincronizar(coord, plan, estados_impl)
+    if faltan.empty:
+        return 0
+    hoy = now_col().date()
+    filas = []
+    for r in faltan.itertuples():
+        f = {c: "" for c in COLS_PLANEACION}
+        f.update({"identificacion": r.id_norm, "nombre": r.nombre, "celular": r.celular, "zona": r.ciudad,
+                  "vehiculo": r.vehiculo, "estado_planeacion": "Nuevo", "intentos_llamada": 0,
+                  "intentos_sin_contacto": 0, "proxima_gestion": hoy, "bloqueado": False, "fecha_ingreso": hoy})
+        filas.append(_str_dict(f))
+    ws = conectar_sheets().worksheet("PLANEACION_ALIADOS")
+    headers = ws.row_values(1)  # respeta el orden real de columnas de la hoja
+    ws.append_rows([[f.get(h, "") for h in headers] for f in filas], value_input_option="RAW")
+    _invalidar_roster("plan_roster")
+    return len(filas)
+
+
+def _cola_actual(forzar=False):
+    plan = _get_roster("plan_roster", "PLANEACION_ALIADOS", COLS_PLANEACION, forzar=forzar)
+    coord = _get_roster("coord_roster", "COORDINADOR_ALIADOS", COLS_COORDINADOR, forzar=forzar)
+    hist = _get_historial("plan_hist", "PLANEACION_GESTIONES", COLS_PLANEACION_GESTIONES, forzar=forzar)
+    return construir_cola_planeacion(plan, coord, hist)
+
+
+def _csv(df):
+    return df.to_csv(index=False).encode("utf-8-sig")  # utf-8-sig: Excel abre bien las tildes
+
+
+def _ir_a_gestionar(ident):
+    """Callback: precarga el buscador del analista con la cédula elegida."""
+    st.session_state["modo_busq_plan"] = "Cédula"
+    st.session_state["buscar_planeacion"] = ident
+
+
+def render_resumen_ciudad(cola, clave):
+    if cola.empty:
+        st.info("Aún no hay aliados en Planeación.")
+        return
+    res = resumen_por_ciudad(cola)
+    st.dataframe(res, hide_index=True, use_container_width=True)
+    graf = res[res.Ciudad != "TOTAL"].melt(id_vars="Ciudad", value_vars=["Gestionados", "Pendientes hoy"],
+                                           var_name="Indicador", value_name="Aliados")
+    if not graf.empty:
+        st.plotly_chart(px.bar(graf, x="Ciudad", y="Aliados", color="Indicador", barmode="group",
+                               title="Gestionado vs pendiente por ciudad"), use_container_width=True)
+    st.download_button("📥 Descargar resumen por ciudad (CSV)", _csv(res),
+                       f"resumen_ciudad_{now_col().date()}.csv", "text/csv", key=f"dl_res_{clave}")
+
+
+def render_cola_planeacion(rol, clave):
+    if st.button("🔄 Actualizar cola", key=f"cola_ref_{clave}"):
+        cola = _cola_actual(forzar=True)
+    else:
+        cola = _cola_actual()
+    if cola.empty:
+        st.info("No hay aliados en Planeación todavía. El Coordinador debe cargar o sincronizar la base.")
+        return
+
+    c1, c2 = st.columns([1, 2])
+    ciudad_sel = c1.selectbox("Ciudad a gestionar", ["Todas"] + sorted(cola.ciudad.unique()), key=f"cola_ciudad_{clave}")
+    sit_sel = c2.multiselect("Mostrar", list(ORDEN_SITUACION), default=SITUACIONES_PENDIENTES, key=f"cola_sit_{clave}")
+    base = cola if ciudad_sel == "Todas" else cola[cola.ciudad == ciudad_sel]
+
+    m = st.columns(6)
+    m[0].metric("Total ciudad", len(base))
+    m[1].metric("🆕 Nunca gestionados", int((~base.gestionado).sum()))
+    m[2].metric("📵 Sin contacto", int((base.situacion == SIT_SIN_CONTACTO).sum()))
+    m[3].metric("✅ Por validar", int((base.situacion == SIT_VALIDAR).sum()))
+    m[4].metric("📋 Pendientes hoy", int(base.pendiente_hoy.sum()))
+    m[5].metric("⏳ En espera", int((base.situacion == SIT_ESPERA).sum()))
+
+    vista = base[base.situacion.isin(sit_sel)]
+    st.dataframe(vista[COLS_VISTA_COLA].rename(columns=RENOMBRE_COLA), hide_index=True, use_container_width=True)
+
+    d1, d2 = st.columns(2)
+    d1.download_button(f"📥 Descargar lo mostrado ({len(vista)})", _csv(vista[COLS_VISTA_COLA].rename(columns=RENOMBRE_COLA)),
+                       f"cola_{ciudad_sel}_{now_col().date()}.csv", "text/csv", key=f"dl_vista_{clave}")
+    d2.download_button("📥 Descargar base completa con estado", _csv(base[COLS_VISTA_COLA].rename(columns=RENOMBRE_COLA)),
+                       f"base_planeacion_{ciudad_sel}_{now_col().date()}.csv", "text/csv", key=f"dl_base_{clave}")
+
+    if rol == "Analista":
+        pend = vista[vista.situacion.isin(SITUACIONES_PENDIENTES)].head(300)
+        if pend.empty:
+            st.success("🎉 No te queda nada pendiente en esta selección.")
+        else:
+            opciones = {f"{r.identificacion} · {r.nombre} · {r.situacion}": r.identificacion for r in pend.itertuples()}
+            sel = st.selectbox("Siguiente aliado a gestionar", list(opciones), key=f"cola_sel_{clave}")
+            st.button("➡️ Cargar en el formulario de abajo", key=f"cola_go_{clave}",
+                      on_click=_ir_a_gestionar, args=(opciones[sel],))
+
+
+# =========================================================================
 # LOGIN
 # =========================================================================
 st.title("🚚 Planeación de Aliados")
@@ -994,8 +1182,9 @@ with st.sidebar:
 # PERFIL: COORDINADOR
 # =========================================================================
 if perfil == "Coordinador":
-    tab_tablero, tab_carga, tab_hoy, tab_hist, tab_reglas, tab_cumpl = st.tabs(
-        ["📊 Tablero", "📥 Cargar Bases", "📋 Gestión de Hoy", "📅 Histórico", "⚙️ Reglas", "🚚 Cumplimiento de cargue"]
+    tab_tablero, tab_carga, tab_hoy, tab_hist, tab_reglas, tab_cumpl, tab_pend = st.tabs(
+        ["📊 Tablero", "📥 Cargar Bases", "📋 Gestión de Hoy", "📅 Histórico", "⚙️ Reglas",
+         "🚚 Cumplimiento de cargue", "🗂️ Pendientes por ciudad"]
     )
 
     with tab_tablero:
@@ -1021,6 +1210,9 @@ if perfil == "Coordinador":
             if not dist.empty:
                 dist.columns = ["Categoría", "N"]
                 st.plotly_chart(px.bar(dist, x="Categoría", y="N", title="Aliados por categoría (Planeación)"), use_container_width=True)
+
+        st.subheader("Cumplimiento por ciudad: gestionado vs pendiente")
+        render_resumen_ciudad(_cola_actual(), "tablero")
 
         st.subheader("Requerimientos Supply")
         if df_req.empty:
@@ -1060,6 +1252,19 @@ if perfil == "Coordinador":
                     st.success(f"✅ {nn} requerimientos nuevos · {na} actualizados")
                 except Exception as e:
                     st.error(f"No se pudo procesar el archivo: {e}")
+
+        with st.expander("🔗 Sincronizar aliados de Coordinador → Planeación", expanded=True):
+            st.caption("Agrega a Planeación (como 'Nuevo', próxima gestión hoy) los aliados de COORDINADOR_ALIADOS que aún no están. No toca a los que ya existen.")
+            coord_s = _get_roster("coord_roster", "COORDINADOR_ALIADOS", COLS_COORDINADOR)
+            plan_s = _get_roster("plan_roster", "PLANEACION_ALIADOS", COLS_PLANEACION)
+            estados_disp = sorted(x for x in coord_s.estado_implementacion.unique() if x)
+            estados_sel = st.multiselect("Estados de Implementación a incluir", estados_disp, default=estados_disp, key="sync_estados")
+            faltan = aliados_por_sincronizar(coord_s, plan_s, estados_sel)
+            st.metric("Aliados de Coordinador que aún no están en Planeación", len(faltan))
+            if len(faltan) and st.button("🚀 Agregar a Planeación", key="btn_sync"):
+                with st.spinner("Sincronizando..."):
+                    n = sincronizar_coordinador_a_planeacion(estados_sel)
+                st.success(f"✅ {n} aliados agregados. Actualiza la página para ver el conteo nuevo.")
 
     with tab_hoy:
         st.subheader("Gestión de hoy — supervisión")
@@ -1330,6 +1535,13 @@ if perfil == "Coordinador":
             st.download_button("📥 Descargar detalle (CSV)", det.to_csv(index=False).encode("utf-8-sig"),
                                f"cumplimiento_cargue_{c_f1}_{c_f2}.csv", "text/csv")
 
+    # ------------------------------------------------------------------
+    # PENDIENTES POR CIUDAD (cola de gestión vista por el coordinador)
+    # ------------------------------------------------------------------
+    with tab_pend:
+        st.subheader("🗂️ Pendientes por ciudad")
+        render_cola_planeacion("Coordinador", "coord")
+
 
 # =========================================================================
 # PERFIL: ANALISTA
@@ -1341,6 +1553,9 @@ if perfil == "Analista":
     # GESTIÓN DE ALIADOS (PLANEACIÓN)
     # ------------------------------------------------------------------
     with tab_aliados:
+        with st.expander("🗂️ Mi cola de gestión por ciudad", expanded=True):
+            render_cola_planeacion("Analista", "analista")
+
         df_plan = _get_roster("plan_roster", "PLANEACION_ALIADOS", COLS_PLANEACION)
         if df_plan.empty:
             st.info("Coordinación todavía no ha cargado la base de Planeación.")
@@ -1437,15 +1652,6 @@ if perfil == "Analista":
                             _agregar_local("plan_hist", log, COLS_PLANEACION_GESTIONES)
                             st.success("Guardado.")
                             st.rerun()
-
-        st.markdown("### 📋 Pendientes de gestión")
-        df_plan = _get_roster("plan_roster", "PLANEACION_ALIADOS", COLS_PLANEACION)
-        if not df_plan.empty:
-            vista = df_plan[~df_plan.bloqueado.apply(es_verdadero)]
-            st.dataframe(
-                vista[["identificacion", "nombre", "celular", "zona", "analista", "estado_planeacion", "categoria", "intentos_llamada", "proxima_gestion"]],
-                hide_index=True, use_container_width=True,
-            )
 
     # ------------------------------------------------------------------
     # REQUERIMIENTOS SUPPLY
@@ -1593,6 +1799,8 @@ if perfil == "Analista":
             c2.metric("Contactados", int((mp.resultado == "Sí contestó").sum()))
             c3.metric("Interesados", int((mp.estado_final == "Interesado Carga/Reserva").sum()))
             st.dataframe(mp.sort_values("fecha", ascending=False), hide_index=True, use_container_width=True)
+            st.download_button("📥 Descargar mi historial (CSV)", mp.to_csv(index=False).encode("utf-8-sig"),
+                               f"mi_historial_{f1}_{f2}.csv", "text/csv", key="dl_mi_hist")
             if len(mp) >= 3:
                 rr = mp.resultado.value_counts().reset_index()
                 rr.columns = ["Resultado", "N"]
